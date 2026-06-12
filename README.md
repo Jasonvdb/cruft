@@ -1,19 +1,125 @@
 # cruft
 
-> 🚧 Work in progress — not yet usable. Watch this repo for the first release.
-
 A macOS menu bar app that finds the developer build cruft eating your disk —
-Xcode DerivedData, stray in-repo `build/` folders, Gradle caches, SwiftPM and
-npm/yarn/pnpm caches — and cleans it safely.
+and cleans it safely.
+
+Xcode DerivedData, stray in-repo `build/` folders, Gradle caches, SwiftPM,
+npm/yarn/pnpm caches: on a machine with a couple dozen projects this quietly
+grows to **tens or hundreds of GB**, and the built-in macOS storage pane is
+slow, incomplete, and lumps in things you should never delete. cruft shows
+the total in your menu bar, keeps it fresh in the background without ever
+making your Mac feel busy, and cleans it with one confirmed click.
 
 **Only things that can be derived again are ever touched.** Simulators, iOS
 device support, source code, and anything else you can't get back are off
-limits by design, enforced by a single audited deletion choke point
-(`SafeDeleter`), a hard denylist, and a CI check that fails the build if any
-other code path acquires a file-removal API. A full safety-model write-up
-lands here with the first release.
+limits by design — see [Safety model](#safety-model).
 
-Also ships `cruft-cli` for scripted scans and cleans.
+> 🚧 Pre-release: fully functional and heavily tested against fixture
+> trees, but no notarized binary yet — build from source below. A signed
+> release + Homebrew cask are planned.
+
+## What it cleans
+
+| Category | Location | Re-derivable? |
+|---|---|---|
+| Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData` (per-project) | ✅ rebuilds on next build |
+| Project build folders | `build/`, `.build/`, `.gradle/` next to project markers under your projects root | ✅ rebuilds |
+| Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
+| SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
+| Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** (never Devices) | ✅ regenerates |
+| JS package caches | `~/.npm/_cacache`, Yarn, pnpm caches/store | ✅ re-downloads |
+| Xcode Archives | `~/Library/Developer/Xcode/Archives` | ⚠️ **NOT re-derivable** (release dSYMs) — excluded from Clean All by default, explicit per-category clean with a red warning |
+
+Never touched: CoreSimulator **Devices**, iOS/watchOS DeviceSupport, Android
+AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper
+distributions, and anything outside your home directory.
+
+## Safety model
+
+cruft deletes files, so it is engineered like it.
+
+- **One deletion choke point.** Every byte that leaves the disk goes through
+  a single audited type, [`SafeDeleter`](CruftKit/Sources/CruftKit/SafeDeleter.swift).
+  A CI check ([`Scripts/check-chokepoint.sh`](Scripts/check-chokepoint.sh))
+  fails the build if any other production code acquires a file-removal API.
+- **Eight rules, all must pass**, compared on canonical (symlink-resolved)
+  paths on both sides: inside your home; home-override backstop (only the
+  real `$HOME` or a temp-area test fixture is ever accepted); inside the
+  category's allowed roots; a hard **denylist** (`.git`, `Devices`,
+  `DeviceSupport`, `.avd`, `UserData`, iCloud's `Mobile Documents`) that
+  beats the allowlist; a depth floor; symlinks deleted as links, never
+  followed; must exist and be owned by you; and a dry-run mode that runs
+  every check without touching anything.
+- **Adversarially tested.** The test suite includes named attack fixtures —
+  symlinks escaping home, symlinks into `.git`, mis-cased denylist
+  components on case-insensitive APFS, `..` traversal, depth-floor edges —
+  plus a conformance suite that pushes every item every scanner discovers
+  through the real SafeDeleter in dry-run.
+- **Nothing is deleted without a confirmation dialog**, which shows exactly
+  what will be removed, warns if Xcode or a Gradle daemon is running, and
+  requires a second explicit opt-in for the one non-re-derivable category.
+- **Honest numbers.** Freed space is measured as the volume's free-space
+  delta (`statfs`), not per-file sums — APFS clones can't inflate it.
+
+## Polite by design
+
+Scanning ~100 GB of caches without making your Mac feel slow is most of the
+engineering here:
+
+- Sizing is a **pure metadata walk** — file contents are never read.
+- Scheduled scans run at background QoS, which gets kernel-throttled disk
+  I/O; user-initiated scans never run above utility priority.
+- A **quiet gate** skips scanning DerivedData while a build is actively
+  writing into it; low power mode, thermal pressure, and low battery defer
+  scheduled scans.
+- Last-known sizes persist, so the menu opens instantly with
+  "updated X ago" while fresh numbers stream in — totals never flicker or
+  shrink mid-scan.
+- Background rescan every 4 h (configurable), refresh-on-open when stale,
+  and instant invalidation when something else cleaned a cache externally.
+
+## Install
+
+Build from source (Xcode 16+):
+
+```sh
+git clone https://github.com/Jasonvdb/cruft.git
+cd cruft
+xcodebuild -project Cruft.xcodeproj -scheme Cruft -configuration Release build
+```
+
+First scan of your projects folder triggers the standard macOS prompt for
+access to `~/Documents` — that's the OS, not us phoning home (cruft has no
+network code at all).
+
+## cruft-cli
+
+Everything the app does is scriptable:
+
+```sh
+swift run --package-path CruftKit cruft-cli scan --json
+swift run --package-path CruftKit cruft-cli clean --category derived-data            # dry run
+swift run --package-path CruftKit cruft-cli clean --category derived-data --yes      # delete
+```
+
+`clean` is dry-run by default. Deleting from your real home requires an
+extra explicit flag beyond `--yes` (it tells you which).
+
+## Extending
+
+A cache category is one small type conforming to
+[`CacheSource`](CruftKit/Sources/CruftKit/CacheSource.swift) (discover items
++ declare allowed deletion roots) plus one registry line. Rust `target/`
+dirs, CocoaPods, ccache — PRs welcome; the conformance suite automatically
+holds any new source to the same safety rules.
+
+## Development
+
+```sh
+swift test --package-path CruftKit        # 152 tests, hermetic (fixture homes in /tmp)
+./Scripts/check-chokepoint.sh             # single-deletion-site invariant
+swift run --package-path CruftKit cruft-cli fixture /tmp/cruft-fixture   # canonical test tree
+```
 
 ## License
 
