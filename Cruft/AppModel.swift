@@ -1,5 +1,6 @@
 import AppKit
 import CruftKit
+import Darwin
 import Foundation
 import Observation
 
@@ -18,9 +19,11 @@ struct PendingCleanConfirmation {
     let entries: [Entry]
     let totalItemCount: Int
     let estimatedBytes: Int64
-    /// Process + destructive warnings in CleanPlanner order. The view
-    /// renders `CleanPlanner.destructiveWarning` in red, the rest in orange.
-    let warnings: [String]
+    /// Built separately by AppModel so the view styles by LIST (orange vs
+    /// red), never by string-matching warning text. `plan.warnings` still
+    /// carries both combined for CLI parity.
+    let processWarnings: [String]
+    let destructiveWarnings: [String]
     let plan: CleanPlan
 }
 
@@ -65,10 +68,19 @@ final class AppModel {
     /// Transient "nothing to clean" notice (auto-clears after a moment).
     private(set) var showsNothingToClean = false
 
+    /// User settings (UserDefaults-backed; ephemeral under CRUFT_HOME).
+    let settings: SettingsStore
+
     private let sources: [any CacheSource]
-    private let context: ScanContext
+    /// Effective home (real $HOME or the CRUFT_HOME fixture) — kept so
+    /// `applySettingsChange()` can rebuild the context around a new
+    /// projects root.
+    private let homeURL: URL
+    /// Rebuilt (with the engine) when the projects root changes.
+    private var context: ScanContext
     private let statsStore: StatsStore
-    private let engine: ScanEngine
+    private var engine: ScanEngine
+    private var rescanScheduler: RescanScheduler?
     /// CRUFT_DEBUG_DUMP harness (verification): once every category reaches
     /// a terminal state, print one stderr line per category and keep running.
     private let debugDump: Bool
@@ -87,15 +99,18 @@ final class AppModel {
     /// every `.finished` event) — what clean plans are built from.
     private var latestSnapshots: [CategoryID: CategorySnapshot] = [:]
     private var nothingToCleanClearTask: Task<Void, Never>?
-    /// Phase 6 settings hooks: user overrides for Clean All membership.
-    /// Empty until the settings UI arrives, so destructive categories
-    /// (Archives) stay out of Clean All.
-    private var cleanAllUserIncluded: Set<CategoryID> = []
-    private var cleanAllUserExcluded: Set<CategoryID> = []
+
+    /// User overrides for Clean All membership, read live from settings at
+    /// plan time — toggles never rebuild the engine (they only affect
+    /// planning). CleanPlanner enforces destructive-only-via-explicit-include.
+    private var cleanAllUserIncluded: Set<CategoryID> { settings.cleanAllIncludedIDs }
+    private var cleanAllUserExcluded: Set<CategoryID> { settings.cleanAllExcludedIDs }
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let sources = SourceRegistry.allSources
         self.sources = sources
+        let settings = SettingsStore(environment: environment)
+        self.settings = settings
 
         // CRUFT_HOME points scans at a fixture home (testing). Fixture runs
         // must not pollute the real stats file, so an overridden home keeps
@@ -103,8 +118,9 @@ final class AppModel {
         let overrideHome = environment["CRUFT_HOME"].map {
             URL(filePath: $0, directoryHint: .isDirectory)
         }
-        let context = ScanContext(
-            home: overrideHome ?? FileManager.default.homeDirectoryForCurrentUser)
+        let homeURL = overrideHome ?? FileManager.default.homeDirectoryForCurrentUser
+        self.homeURL = homeURL
+        let context = ScanContext(home: homeURL, projectsRoot: settings.projectsRootURL)
         self.context = context
         let statsStore = StatsStore(
             fileURL: overrideHome == nil
@@ -113,19 +129,30 @@ final class AppModel {
         self.statsStore = statsStore
         // SafeDeleter refuses any home that is neither the real $HOME nor a
         // system temp area, so a bad CRUFT_HOME fails loudly at launch.
-        self.engine = ScanEngine(
-            sources: sources,
-            context: context,
-            deleter: try! SafeDeleter(home: context.home, mode: .live),
-            statsStore: statsStore
-        )
+        let engine = Self.makeEngine(sources: sources, context: context, statsStore: statsStore)
+        self.engine = engine
         self.debugDump = environment["CRUFT_DEBUG_DUMP"] != nil
         // HARD GUARD half 1: the autoclean harness can only arm when the
         // home is overridden — it must never exist against the real $HOME.
         self.debugAutoClean =
             environment["CRUFT_DEBUG_AUTOCLEAN"] != nil && overrideHome != nil
         self.menuState = MenuState(sources: sources, persisted: [])
+        self.rescanScheduler = RescanScheduler(
+            engine: engine,
+            intervalHours: settings.rescanIntervalHours,
+            environment: environment)
         Task { await self.start() }
+    }
+
+    private static func makeEngine(
+        sources: [any CacheSource], context: ScanContext, statsStore: StatsStore
+    ) -> ScanEngine {
+        ScanEngine(
+            sources: sources,
+            context: context,
+            deleter: try! SafeDeleter(home: context.home, mode: .live),
+            statsStore: statsStore
+        )
     }
 
     /// The status item title: the formatted total once any value is known,
@@ -133,6 +160,12 @@ final class AppModel {
     var menuBarTitle: String? {
         guard menuState.rows.contains(where: { $0.bytes != nil }) else { return nil }
         return Self.formattedBytes(menuState.displayedTotalBytes)
+    }
+
+    /// The EFFECTIVE projects root (the context's, after defaulting) — what
+    /// the Settings window displays.
+    var projectsRootDisplayPath: String {
+        context.projectsRoot.path(percentEncoded: false)
     }
 
     /// When the displayed numbers were last confirmed by a finished scan.
@@ -150,6 +183,13 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
+        if debugDump {
+            // Status read-back observable for the phase gate (no
+            // registration happens here — only the Settings toggle does).
+            let status = LaunchAtLogin.status
+            FileHandle.standardError.write(
+                Data("CRUFT_LAUNCH_AT_LOGIN status=\(status.rawValue)\n".utf8))
+        }
         let persisted = await statsStore.load()
         menuState = MenuState(sources: sources, persisted: persisted)
         latestSnapshots = Dictionary(
@@ -172,6 +212,7 @@ final class AppModel {
     /// The menu just opened: refresh quietly when nothing refreshed recently.
     func menuOpened() {
         guard started else { return }
+        refreshExternallyCleanedCategories()
         let reference = [lastRefreshAt, newestDisplayedUpdate].compactMap { $0 }.max()
         if let reference, Date().timeIntervalSince(reference) <= Self.menuOpenStaleness {
             return
@@ -181,9 +222,75 @@ final class AppModel {
         Task { await engine.refresh(trigger: .menuOpened) }
     }
 
+    /// Menu-open external-clean check (perf plan): someone may have deleted
+    /// displayed items outside cruft (`rm -rf`, Xcode's own cleanups). One
+    /// cheap stat(2) existence pass over the latest snapshots' item paths,
+    /// off-main; any category with a missing path is rescanned regardless of
+    /// the 30-minute staleness window.
+    private func refreshExternallyCleanedCategories() {
+        let pathsByCategory = latestSnapshots.mapValues { snapshot in
+            snapshot.items.map { $0.item.url.path(percentEncoded: false) }
+        }
+        guard !pathsByCategory.isEmpty else { return }
+        let engine = engine
+        Task.detached(priority: .utility) {
+            var missing: Set<CategoryID> = []
+            for (category, paths) in pathsByCategory {
+                for path in paths {
+                    var status = stat()
+                    if stat(path, &status) != 0 {
+                        missing.insert(category)
+                        break
+                    }
+                }
+            }
+            guard !missing.isEmpty else { return }
+            await engine.refresh(categories: missing, trigger: .menuOpened)
+        }
+    }
+
+    // MARK: - Settings
+
+    /// Settings just changed (called by SettingsView after any edit).
+    /// Interval changes re-register the scheduler; a projects-root change
+    /// rebuilds the scan stack: the ScanContext is immutable, the engine's
+    /// event stream is single-consumer, and `cancelAll` is terminal — so
+    /// "apply" means tear down the consumer task, cancelAll the old engine,
+    /// build a fresh engine + consumer (same StatsStore), and rescan the
+    /// in-repo-build category. Clean All toggles deliberately reach none of
+    /// this — they are read live at plan time.
+    func applySettingsChange() {
+        rescanScheduler?.setIntervalHours(settings.rescanIntervalHours)
+
+        let newContext = ScanContext(home: homeURL, projectsRoot: settings.projectsRootURL)
+        let newRoot = newContext.projectsRoot.path(percentEncoded: false)
+        guard newRoot != context.projectsRoot.path(percentEncoded: false) else { return }
+
+        eventsTask?.cancel()
+        let oldEngine = engine
+        context = newContext
+        let newEngine = Self.makeEngine(sources: sources, context: newContext, statsStore: statsStore)
+        engine = newEngine
+        attachEventsConsumer()
+        rescanScheduler?.setEngine(newEngine)
+
+        // The old root's numbers are no longer truthful: drop the retained
+        // row (the fresh scan's partials repaint from zero) and the stale
+        // snapshot — a clean planned from it would target old-root paths.
+        latestSnapshots[InRepoBuildSource.id] = nil
+        menuState.noteCleaned(InRepoBuildSource.id)
+        lastRefreshAt = Date()
+        Task {
+            await oldEngine.cancelAll()
+            await self.statsStore.invalidate(category: InRepoBuildSource.id)
+            await newEngine.refresh(categories: [InRepoBuildSource.id], trigger: .manual)
+        }
+    }
+
     /// Quit path (the only one — LSUIElement apps have no dock menu): stop
     /// the engine for good, flush coalesced stats, then terminate.
     func quit() {
+        rescanScheduler?.invalidate()
         Task {
             await engine.cancelAll()
             await statsStore.flush()
@@ -239,18 +346,20 @@ final class AppModel {
             noteNothingToClean()
             return
         }
+        let processWarnings = ProcessGuard().warnings(for: [category])
         let plan = planner.planCategory(
             category,
             snapshots: snapshots,
-            processWarnings: ProcessGuard().warnings(for: [category])
+            processWarnings: processWarnings
         )
         let displayName = sources.first { $0.id == category }?.displayName ?? category.rawValue
-        pendingPlan = makeConfirmation(title: "Clean \(displayName)", plan: plan)
+        pendingPlan = makeConfirmation(
+            title: "Clean \(displayName)", plan: plan, processWarnings: processWarnings)
     }
 
     /// Clean All membership comes from the planner's defaults plus the
-    /// (Phase 6, currently empty) user include/exclude sets — so destructive
-    /// categories stay out until the user can opt in via settings.
+    /// user's include/exclude sets from Settings — destructive categories
+    /// (Archives) join only via the explicit opt-in toggle there.
     func requestCleanAll() {
         guard pendingPlan == nil, !isCleaning else { return }
         let planner = CleanPlanner(sources: sources)
@@ -266,13 +375,14 @@ final class AppModel {
             noteNothingToClean()
             return
         }
+        let processWarnings = ProcessGuard().warnings(for: Set(draft.itemsByCategory.keys))
         let plan = planner.planCleanAll(
             snapshots: snapshots,
             userIncluded: cleanAllUserIncluded,
             userExcluded: cleanAllUserExcluded,
-            processWarnings: ProcessGuard().warnings(for: Set(draft.itemsByCategory.keys))
+            processWarnings: processWarnings
         )
-        pendingPlan = makeConfirmation(title: "Clean All", plan: plan)
+        pendingPlan = makeConfirmation(title: "Clean All", plan: plan, processWarnings: processWarnings)
     }
 
     func cancelPendingClean() {
@@ -300,27 +410,48 @@ final class AppModel {
         var perCategory: [CleanResult.CategoryResult] = []
         var errorMessage: String?
         // Registry order, matching the menu rows.
-        for source in sources {
-            guard let items = plan.itemsByCategory[source.id] else { continue }
-            do {
-                let outcome = try await engine.clean(category: source.id, items: items)
-                freedBytes += outcome.freedBytes
-                deletedItems += outcome.deletedPaths.count
-                perCategory.append(CleanResult.CategoryResult(
-                    id: source.id,
-                    displayName: source.displayName,
-                    deletedItems: outcome.deletedPaths.count))
-                // The retained number is no longer truthful: drop it and let
-                // the engine's automatic `.postClean` rescan repaint from
-                // zero (MenuState.noteCleaned owns that rule).
-                latestSnapshots[source.id] = nil
-                menuState.noteCleaned(source.id)
-            } catch {
-                // Stop on the first error: already-cleaned categories stay
-                // cleaned, the message reaches the result line, never crash.
-                errorMessage = String(describing: error)
-                break
+        categories: for source in sources {
+            guard var remaining = plan.itemsByCategory[source.id] else { continue }
+            var categoryDeleted = 0
+            // An item can vanish between the dialog opening and now (an
+            // external `rm`, Xcode's own cleanup). SafeDeleter reports that
+            // as `.doesNotExist`; drop JUST that item and retry the rest —
+            // everything else was still consented to. Any other error
+            // aborts the whole run, as before. Bounded: each retry removes
+            // one vanished `.entireItem` (or re-lists a `.contentsOnly`
+            // root, which then skips its vanished child).
+            var retriesLeft = remaining.count + 3
+            while !remaining.isEmpty, retriesLeft > 0 {
+                retriesLeft -= 1
+                do {
+                    let outcome = try await engine.clean(category: source.id, items: remaining)
+                    freedBytes += outcome.freedBytes
+                    categoryDeleted += outcome.deletedPaths.count
+                    remaining = []
+                } catch SafeDeleterError.doesNotExist(let path) {
+                    let vanished = Self.normalizedPath(path)
+                    remaining.removeAll {
+                        Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
+                    }
+                } catch {
+                    // Stop on any real error: already-cleaned categories
+                    // stay cleaned, the message reaches the result line,
+                    // never crash. (The engine's error path still enqueues
+                    // a `.postClean` rescan, so the display self-corrects.)
+                    errorMessage = String(describing: error)
+                    break categories
+                }
             }
+            deletedItems += categoryDeleted
+            perCategory.append(CleanResult.CategoryResult(
+                id: source.id,
+                displayName: source.displayName,
+                deletedItems: categoryDeleted))
+            // The retained number is no longer truthful: drop it and let
+            // the engine's automatic `.postClean` rescan repaint from
+            // zero (MenuState.noteCleaned owns that rule).
+            latestSnapshots[source.id] = nil
+            menuState.noteCleaned(source.id)
         }
         lastCleanResult = CleanResult(
             freedBytes: freedBytes,
@@ -331,7 +462,19 @@ final class AppModel {
         finishDebugAutoCleanIfArmed(freedBytes: freedBytes)
     }
 
-    private func makeConfirmation(title: String, plan: CleanPlan) -> PendingCleanConfirmation {
+    /// SafeDeleter compares (and reports) percent-decoded paths; directory
+    /// URLs from different APIs may disagree only on a trailing slash.
+    private static func normalizedPath(_ path: String) -> String {
+        var path = path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
+    private func makeConfirmation(
+        title: String, plan: CleanPlan, processWarnings: [String]
+    ) -> PendingCleanConfirmation {
         let entries = sources.compactMap { source -> PendingCleanConfirmation.Entry? in
             guard let items = plan.itemsByCategory[source.id] else { return nil }
             return PendingCleanConfirmation.Entry(
@@ -340,12 +483,18 @@ final class AppModel {
                 itemCount: items.count,
                 bytes: latestSnapshots[source.id]?.totalBytes ?? 0)
         }
+        // Built from source flags, not by matching warning strings: any
+        // destructive category in the plan carries the planner's warning.
+        let hasDestructive = sources.contains {
+            $0.isDestructive && plan.itemsByCategory[$0.id] != nil
+        }
         return PendingCleanConfirmation(
             title: title,
             entries: entries,
             totalItemCount: entries.reduce(0) { $0 + $1.itemCount },
             estimatedBytes: plan.estimatedBytes,
-            warnings: plan.warnings,
+            processWarnings: processWarnings,
+            destructiveWarnings: hasDestructive ? [CleanPlanner.destructiveWarning] : [],
             plan: plan)
     }
 

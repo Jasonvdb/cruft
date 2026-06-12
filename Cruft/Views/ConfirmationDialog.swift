@@ -47,14 +47,20 @@ struct ConfirmationDialog: View {
                     .monospacedDigit()
             }
 
-            if !pending.warnings.isEmpty {
+            if !pending.processWarnings.isEmpty || !pending.destructiveWarnings.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(pending.warnings, id: \.self) { warning in
-                        // Destructive warnings (exact CleanPlanner text) are
-                        // red and bold; process warnings are orange.
+                    // Styled by LIST (AppModel builds the two separately),
+                    // never by matching warning text: process warnings are
+                    // orange, destructive warnings red and bold.
+                    ForEach(pending.processWarnings, id: \.self) { warning in
                         Label(warning, systemImage: "exclamationmark.triangle.fill")
-                            .font(isDestructive(warning) ? .caption.bold() : .caption)
-                            .foregroundStyle(isDestructive(warning) ? Color.red : Color.orange)
+                            .font(.caption)
+                            .foregroundStyle(Color.orange)
+                    }
+                    ForEach(pending.destructiveWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.red)
                     }
                 }
             }
@@ -70,10 +76,6 @@ struct ConfirmationDialog: View {
             }
             .controlSize(.small)
         }
-    }
-
-    private func isDestructive(_ warning: String) -> Bool {
-        warning == CleanPlanner.destructiveWarning
     }
 
     private var deleteButtonTitle: String {

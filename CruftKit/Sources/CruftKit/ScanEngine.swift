@@ -206,10 +206,16 @@ public actor ScanEngine {
                 await statsStore.noteCleaned(category: category, deletedPaths: deletedPaths)
             }
             finishClean(category)
-            return CleanOutcome(
-                deletedPaths: deletedPaths,
-                freedBytes: max(0, freeAfter - freeBefore)
-            )
+            // Either statfs sample failing means the delta is meaningless:
+            // report 0 freed rather than a phantom number (a one-sided
+            // sample would otherwise leak the volume's total free space).
+            let freedBytes: Int64
+            if let freeBefore, let freeAfter {
+                freedBytes = max(0, freeAfter - freeBefore)
+            } else {
+                freedBytes = 0
+            }
+            return CleanOutcome(deletedPaths: deletedPaths, freedBytes: freedBytes)
         } catch {
             finishClean(category)
             throw error
@@ -518,10 +524,11 @@ public actor ScanEngine {
     }
 
     /// statfs(2) free bytes on the volume containing `url` — the ground
-    /// truth both sides of `CleanOutcome.freedBytes`.
-    private static func freeBytes(onVolumeOf url: URL) -> Int64 {
+    /// truth both sides of `CleanOutcome.freedBytes`. nil on statfs failure
+    /// so callers can tell "couldn't sample" from "zero free".
+    private static func freeBytes(onVolumeOf url: URL) -> Int64? {
         var status = statfs()
-        guard statfs(url.path(percentEncoded: false), &status) == 0 else { return 0 }
+        guard statfs(url.path(percentEncoded: false), &status) == 0 else { return nil }
         return Int64(status.f_bfree) * Int64(status.f_bsize)
     }
 }

@@ -144,6 +144,10 @@ private let decoyPaths = [
     }
     #expect(fixture.exists("\(FixtureHome.archivesRootPath)/2026-06-01/DemoApp 1.0.xcarchive"))
     #expect(fixture.exists("\(FixtureHome.archivesRootPath)/RootArchive.xcarchive"))
+    // The third archive (planted by plantDerivedDataDecoys as a derived-data
+    // decoy, but a REAL archive item to this category) survives too — all
+    // three Archives items must outlive a default Clean All.
+    #expect(fixture.exists("\(FixtureHome.archivesRootPath)/x.xcarchive"))
 
     // noteCleaned dropped the cleaned rows' numbers immediately: the total
     // shows only the (uncleaned) Archives, never a stale pre-clean value.

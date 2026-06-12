@@ -84,6 +84,10 @@ struct MenuContentView: View {
             Spacer()
             Button("Refresh") { model.refreshNow() }
                 .disabled(model.isCleaning)
+            SettingsLink {
+                Image(systemName: "gearshape")
+            }
+            .help("Settings…")
             Button("Quit") { model.quit() }
         }
         .controlSize(.small)
