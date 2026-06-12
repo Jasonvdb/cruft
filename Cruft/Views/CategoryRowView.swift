@@ -62,12 +62,12 @@ struct CategoryRowView: View {
         }
     }
 
-    /// A row is cleanable once it displays something deletable and no scan
-    /// is mid-flight for it (the engine would interlock anyway; this is
-    /// affordance, not safety).
+    /// A row is cleanable whenever it displays something deletable — even
+    /// mid-rescan: the engine's clean() cancels that category's in-flight
+    /// walk and SafeDeleter re-validates every path at delete time, so
+    /// waiting out a 30-second DerivedData walk buys nothing.
     private var isCleanable: Bool {
-        guard !isBusy else { return false }
-        return (row.itemCount ?? 0) > 0 || (row.bytes ?? 0) > 0
+        (row.itemCount ?? 0) > 0 || (row.bytes ?? 0) > 0
     }
 
     private var sizeText: String {
