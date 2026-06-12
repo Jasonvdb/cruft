@@ -12,7 +12,12 @@ struct CruftApp: App {
         MenuBarExtra {
             MenuContentView(model: model)
         } label: {
-            if let title = model.menuBarTitle {
+            // While a clean runs the GB number is about to be wrong anyway —
+            // show the busy state instead. (Text, not ProgressView: spinners
+            // don't render inside a status-item label.)
+            if model.isCleaning {
+                Label("Cleaning…", systemImage: "sparkles")
+            } else if let title = model.menuBarTitle {
                 Text(title)
             } else {
                 Image(systemName: "internaldrive")
