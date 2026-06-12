@@ -3,6 +3,8 @@
 A macOS menu bar app that finds the developer build cruft eating your disk —
 and cleans it safely.
 
+<img src="docs/screenshot.png" width="360" alt="cruft menu bar popover showing 113.94 GB of reclaimable space across Xcode DerivedData, project build folders, Gradle, SwiftPM, Xcode and JS package caches, with per-category sizes and a Clean All button">
+
 Xcode DerivedData, stray in-repo `build/` folders, Gradle caches, SwiftPM,
 npm/yarn/pnpm caches: on a machine with a couple dozen projects this quietly
 grows to **tens or hundreds of GB**, and the built-in macOS storage pane is
