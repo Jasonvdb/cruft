@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Tests
+        run: swift test --package-path CruftKit
+      - name: Chokepoint invariant
+        run: ./Scripts/check-chokepoint.sh
+      # xcodebuild step for the app target is added in Phase 4
+      # (CODE_SIGNING_ALLOWED=NO — compile-only; ad-hoc signing is local-only).
