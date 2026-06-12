@@ -40,6 +40,11 @@ extension FixtureHome {
         _ = try plantSimulatorCachesFixture()
         _ = try plantSimulatorDeviceDecoy()
 
+        // xcodebuild-mcp: one workspace (1 item) + the config decoys at the
+        // XcodeBuildMCP parent level
+        _ = try plantXcodeBuildMCPWorkspace("DemoApp-abc123")
+        _ = try plantXcodeBuildMCPDecoys()
+
         // js-cache: all four roots (4 items)
         _ = try plantNpmCacacheFixture()
         _ = try plantNpmDecoys()
@@ -63,6 +68,7 @@ extension FixtureHome {
         "gradle": 2,
         "swiftpm-cache": 1,
         "xcode-misc": 2,
+        "xcodebuild-mcp": 1,
         "js-cache": 4,
         "xcode-archives": 3,
     ]

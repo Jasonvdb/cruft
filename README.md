@@ -29,6 +29,7 @@ limits by design — see [Safety model](#safety-model).
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
 | Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** (never Devices) | ✅ regenerates |
+| XcodeBuildMCP workspaces | `~/Library/Developer/XcodeBuildMCP/workspaces` | ✅ rebuilds on next MCP build |
 | JS package caches | `~/.npm/_cacache`, Yarn, pnpm caches/store | ✅ re-downloads |
 | Xcode Archives | `~/Library/Developer/Xcode/Archives` | ⚠️ **NOT re-derivable** (release dSYMs) — excluded from Clean All by default, explicit per-category clean with a red warning |
 
@@ -118,7 +119,7 @@ holds any new source to the same safety rules.
 ## Development
 
 ```sh
-swift test --package-path CruftKit        # 152 tests, hermetic (fixture homes in /tmp)
+swift test --package-path CruftKit        # 162 tests, hermetic (fixture homes in /tmp)
 ./Scripts/check-chokepoint.sh             # single-deletion-site invariant
 swift run --package-path CruftKit cruft-cli fixture /tmp/cruft-fixture   # canonical test tree
 ```

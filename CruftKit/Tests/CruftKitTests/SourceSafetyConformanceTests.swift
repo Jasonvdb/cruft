@@ -86,7 +86,7 @@ private func canonicalPath(_ url: URL) -> String {
             }
         }
     }
-    // The canonical fixture plants all 7 categories — a sudden drop to zero
+    // The canonical fixture plants all 8 categories — a sudden drop to zero
     // means discovery silently broke, not that the machine is clean.
     let expectedTotal = FixtureHome.canonicalExpectedItemCounts.values.reduce(0, +)
     #expect(validatedItems == expectedTotal)

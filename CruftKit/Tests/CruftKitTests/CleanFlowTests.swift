@@ -64,6 +64,8 @@ private let decoyPaths = [
     ".npmrc",
     "Library/Caches/com.apple.somethingelse/Cache.db",
     "Library/pnpm/global/5/package.json",
+    "Library/Developer/XcodeBuildMCP/config.json",
+    "Library/Developer/XcodeBuildMCP/config/settings.json",
 ]
 
 // MARK: - Clean All end to end
