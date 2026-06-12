@@ -16,5 +16,6 @@ jobs:
         run: swift test --package-path CruftKit
       - name: Chokepoint invariant
         run: ./Scripts/check-chokepoint.sh
-      # xcodebuild step for the app target is added in Phase 4
-      # (CODE_SIGNING_ALLOWED=NO — compile-only; ad-hoc signing is local-only).
+      - name: App target (compile only)
+        # CODE_SIGNING_ALLOWED=NO — compile-only; ad-hoc signing is local-only.
+        run: xcodebuild -project Cruft.xcodeproj -scheme Cruft -configuration Debug build CODE_SIGNING_ALLOWED=NO

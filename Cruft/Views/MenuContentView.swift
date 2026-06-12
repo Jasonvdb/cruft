@@ -2,7 +2,9 @@ import CruftKit
 import SwiftUI
 
 /// The MenuBarExtra window: category rows in registry order, an
-/// "updated X ago" footer, and the Refresh / Clean (Phase 5) / Quit row.
+/// "updated X ago" footer, and the Clean All / Refresh / Quit row. While a
+/// clean awaits confirmation the whole window becomes the confirmation
+/// dialog (sheets are unreliable inside `.menuBarExtraStyle(.window)`).
 struct MenuContentView: View {
     let model: AppModel
 
@@ -14,47 +16,77 @@ struct MenuContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("cruft")
-                    .font(.headline)
-                Spacer()
-                Text(totalText)
-                    .font(.headline)
-                    .monospacedDigit()
+            if let pending = model.pendingPlan {
+                ConfirmationDialog(
+                    pending: pending,
+                    onCancel: { model.cancelPendingClean() },
+                    onConfirm: { model.confirmPendingClean() }
+                )
+            } else {
+                mainContent
             }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(model.menuState.rows) { row in
-                    CategoryRowView(row: row)
-                }
-            }
-
-            Divider()
-
-            HStack {
-                Text(footerText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            HStack {
-                // Phase 5 wires cleaning; the affordance ships disabled so
-                // the layout is final before any deletion path exists.
-                Button("Clean…") {}
-                    .disabled(true)
-                    .help("Cleaning arrives in a later build.")
-                Spacer()
-                Button("Refresh") { model.refreshNow() }
-                Button("Quit") { model.quit() }
-            }
-            .controlSize(.small)
         }
         .padding(12)
         .frame(width: 340)
         .onAppear { model.menuOpened() }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("cruft")
+                .font(.headline)
+            Spacer()
+            Text(totalText)
+                .font(.headline)
+                .monospacedDigit()
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(model.menuState.rows) { row in
+                CategoryRowView(
+                    row: row,
+                    cleanDisabled: model.isCleaning,
+                    onClean: { model.requestClean(category: row.id) }
+                )
+            }
+        }
+
+        Divider()
+
+        if let result = model.lastCleanResult {
+            CleanResultView(result: result) { model.dismissCleanResult() }
+        }
+        if model.showsNothingToClean {
+            Text("Nothing to clean.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        HStack {
+            Text(footerText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+
+        HStack {
+            Button("Clean All…") { model.requestCleanAll() }
+                .disabled(model.isCleaning)
+            if model.isCleaning {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.6)
+                    .frame(width: 12, height: 12)
+            }
+            Spacer()
+            Button("Refresh") { model.refreshNow() }
+                .disabled(model.isCleaning)
+            Button("Quit") { model.quit() }
+        }
+        .controlSize(.small)
     }
 
     private var totalText: String {
@@ -62,6 +94,9 @@ struct MenuContentView: View {
     }
 
     private var footerText: String {
+        if model.isCleaning {
+            return "Cleaning…"
+        }
         guard let updated = model.newestDisplayedUpdate else {
             return "Scanning…"
         }

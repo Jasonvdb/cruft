@@ -2,11 +2,15 @@ import CruftKit
 import SwiftUI
 
 /// One category row: name (plus a warning badge for non-re-derivable
-/// categories), a status badge or spinner while work is in flight, and the
-/// retained size on the right — all values come straight from
-/// `MenuState.Row`, which owns the display rules.
+/// categories), a status badge or spinner while work is in flight, the
+/// retained size on the right, and a hover-revealed Clean button — all
+/// values come straight from `MenuState.Row`, which owns the display rules.
 struct CategoryRowView: View {
     let row: MenuState.Row
+    let cleanDisabled: Bool
+    let onClean: () -> Void
+
+    @State private var isHovering = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -34,9 +38,21 @@ struct CategoryRowView: View {
             Text(sizeText)
                 .monospacedDigit()
                 .foregroundStyle(row.bytes == nil ? .secondary : .primary)
+            // Always laid out, opacity-revealed on hover, so rows never
+            // shift when the pointer moves across them.
+            Button(action: onClean) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(cleanDisabled || !isCleanable)
+            .opacity(isHovering && isCleanable ? 1 : 0)
+            .accessibilityLabel("Clean \(row.displayName)")
+            .help("Clean \(row.displayName)…")
         }
         .font(.callout)
         .help(helpText)
+        .onHover { isHovering = $0 }
     }
 
     private var isBusy: Bool {
@@ -44,6 +60,14 @@ struct CategoryRowView: View {
         case .discovering, .sizing: return true
         case .idle, .deferred, .failed: return false
         }
+    }
+
+    /// A row is cleanable once it displays something deletable and no scan
+    /// is mid-flight for it (the engine would interlock anyway; this is
+    /// affordance, not safety).
+    private var isCleanable: Bool {
+        guard !isBusy else { return false }
+        return (row.itemCount ?? 0) > 0 || (row.bytes ?? 0) > 0
     }
 
     private var sizeText: String {
