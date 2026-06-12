@@ -43,22 +43,187 @@ public actor SafeDeleter: ItemDeleting {
         "watchOS DeviceSupport", ".avd", "UserData", "Mobile Documents",
     ]
 
+    /// Rule 5: targets sit at least this many components below home.
+    /// `home/.npm/_cacache/<child>` is exactly 3 and allowed;
+    /// `home/.gradle/caches` as `.entireItem` is 2 and refused.
+    private static let depthFloor = 3
+
     public let mode: Mode
     /// Every URL deleted (live) or validated-as-deletable (dryRun), in order.
     public private(set) var deletedURLs: [URL] = []
+
+    /// Canonical effective home path (trailing slash stripped) — the
+    /// right-hand side of every rule-1 and rule-5 comparison.
+    private let homePath: String
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
     ///   or lives under a system temp area (fixtures).
     public init(home: URL, mode: Mode) throws {
-        // Implemented in Phase 1 (agent 1A). Stub validates nothing yet.
         self.mode = mode
-        _ = home
-        throw SafeDeleterError.homeOverrideRefused("SafeDeleter not implemented (Phase 1)")
+        let candidate = Self.normalizedPath(home.cruftCanonical)
+        let realHome = Self.normalizedPath(
+            FileManager.default.homeDirectoryForCurrentUser.cruftCanonical)
+        guard candidate == realHome
+            || systemTempAreaPrefixes.contains(where: candidate.hasPrefix)
+        else {
+            throw SafeDeleterError.homeOverrideRefused(candidate)
+        }
+        self.homePath = candidate
     }
 
     @discardableResult
     public func delete(_ request: DeletionRequest) async throws -> [URL] {
-        fatalError("SafeDeleter.delete not implemented (Phase 1)")
+        let item = request.item
+        let target = try Self.inspect(item.url)
+        let targetPath = Self.normalizedPath(target.canonicalURL)
+
+        try checkInsideHome(targetPath)
+        try Self.checkDenylist(targetPath)
+        try Self.checkAllowedRoots(
+            targetPath, roots: request.allowedRoots, mode: item.deletionMode)
+
+        switch item.deletionMode {
+        case .entireItem:
+            try checkDepthFloor(targetPath)
+            try Self.validateOwnership(
+                ownerUID: target.ownerUID, currentUID: getuid(), path: targetPath)
+            try perform([target.canonicalURL])
+            return [target.canonicalURL]
+        case .contentsOnly:
+            let children = try validatedChildren(of: target.canonicalURL)
+            try perform(children)
+            return children
+        }
+    }
+
+    /// What the rules need to know about one target, gathered with lstat
+    /// semantics so a symlink is judged (and deleted) as the link itself.
+    private struct Inspection {
+        let canonicalURL: URL
+        let isSymlink: Bool
+        let ownerUID: uid_t?
+    }
+
+    /// Rules 6 and 7 groundwork. A symlink leaf keeps its own name and only
+    /// the PARENT directory is canonicalized — a link pointing outside home
+    /// stays deletable as a link while its target is never validated, and
+    /// `FileManager.removeItem` on a link removes the link, not the
+    /// destination. Non-links canonicalize fully, so a path routed THROUGH
+    /// a symlink is judged at its real location.
+    private static func inspect(_ url: URL) throws -> Inspection {
+        let rawPath = url.path(percentEncoded: false)
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(atPath: rawPath)
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain
+                && error.code == CocoaError.fileReadNoSuchFile.rawValue
+        {
+            throw SafeDeleterError.doesNotExist(rawPath)
+        }
+        let isSymlink = attributes[.type] as? FileAttributeType == .typeSymbolicLink
+        let canonicalURL: URL = isSymlink
+            ? url.deletingLastPathComponent().cruftCanonical.appending(path: url.lastPathComponent)
+            : url.cruftCanonical
+        let ownerUID = (attributes[.ownerAccountID] as? NSNumber).map { uid_t($0.uint32Value) }
+        return Inspection(canonicalURL: canonicalURL, isSymlink: isSymlink, ownerUID: ownerUID)
+    }
+
+    /// Enumerates DIRECT children (hidden files included) of a
+    /// `.contentsOnly` root and re-validates each against rules 1, 4, 5 and
+    /// 7 independently. All-or-nothing: any refusal aborts before a single
+    /// child is touched, so a denylisted child surfaces as
+    /// `denylistedComponent` instead of a partial clean.
+    private func validatedChildren(of root: URL) throws -> [URL] {
+        let names = try FileManager.default
+            .contentsOfDirectory(atPath: root.path(percentEncoded: false))
+            .sorted()
+        var validated: [URL] = []
+        for name in names {
+            let child = try Self.inspect(root.appending(path: name))
+            let childPath = Self.normalizedPath(child.canonicalURL)
+            try checkInsideHome(childPath)
+            try Self.checkDenylist(childPath)
+            try checkDepthFloor(childPath)
+            try Self.validateOwnership(
+                ownerUID: child.ownerUID, currentUID: getuid(), path: childPath)
+            validated.append(child.canonicalURL)
+        }
+        return validated
+    }
+
+    /// The single point where bytes leave the disk. `.dryRun` records the
+    /// same URLs without touching anything.
+    private func perform(_ urls: [URL]) throws {
+        for url in urls {
+            if mode == .live {
+                try FileManager.default.removeItem(at: url)
+            }
+            deletedURLs.append(url)
+        }
+    }
+
+    /// Rule 1. Strictly under: home itself is never a deletable target.
+    private func checkInsideHome(_ canonicalPath: String) throws {
+        guard canonicalPath.hasPrefix(homePath + "/") else {
+            throw SafeDeleterError.outsideHome(canonicalPath)
+        }
+    }
+
+    /// Rule 4. Denylist wins over allowlist, so this runs before the
+    /// allowed-roots check.
+    private static func checkDenylist(_ canonicalPath: String) throws {
+        for component in canonicalPath.split(separator: "/") {
+            if denylistedComponents.contains(String(component)) {
+                throw SafeDeleterError.denylistedComponent(
+                    canonicalPath, component: String(component))
+            }
+        }
+    }
+
+    /// Rule 3. Equality with a root is allowed only for `.contentsOnly`,
+    /// where the root survives and its direct children are deleted instead.
+    private static func checkAllowedRoots(
+        _ canonicalPath: String, roots: [URL], mode: DeletionMode
+    ) throws {
+        let rootPaths = roots.map { normalizedPath($0.cruftCanonical) }
+        if rootPaths.contains(canonicalPath) {
+            guard mode == .contentsOnly else {
+                throw SafeDeleterError.rootItselfRefused(canonicalPath)
+            }
+            return
+        }
+        guard rootPaths.contains(where: { canonicalPath.hasPrefix($0 + "/") }) else {
+            throw SafeDeleterError.outsideAllowedRoots(canonicalPath)
+        }
+    }
+
+    /// Rule 5. Only called after `checkInsideHome`, so the relative slice
+    /// is well-formed.
+    private func checkDepthFloor(_ canonicalPath: String) throws {
+        let relative = canonicalPath.dropFirst(homePath.count + 1)
+        guard relative.split(separator: "/").count >= Self.depthFloor else {
+            throw SafeDeleterError.depthFloorViolated(canonicalPath)
+        }
+    }
+
+    /// Rule 7 (ownership). Takes injected uids because planting a
+    /// foreign-owned fixture requires root: tests drive the refusal branch
+    /// directly and the passing branch end-to-end through `delete`.
+    static func validateOwnership(ownerUID: uid_t?, currentUID: uid_t, path: String) throws {
+        guard let ownerUID, ownerUID == currentUID else {
+            throw SafeDeleterError.notOwnedByCurrentUser(path)
+        }
+    }
+
+    /// Comparable spelling of a canonical URL: percent-decoded path with any
+    /// trailing slash stripped, so directory URLs from different APIs agree.
+    private static func normalizedPath(_ url: URL) -> String {
+        var path = url.path(percentEncoded: false)
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
     }
 }
