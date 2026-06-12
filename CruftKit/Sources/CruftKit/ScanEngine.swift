@@ -78,6 +78,8 @@ public actor ScanEngine {
     private var inFlight: [CategoryID: Task<Void, Never>] = [:]
     private var watchdogs: [CategoryID: Task<Void, Never>] = [:]
     private var pendingQueue: [PendingScan] = []
+    /// Set by `cancelAll` (quit path): no new scans ever start again.
+    private var isShutDown = false
     private var lastDiscovered: [CategoryID: [CacheItem]] = [:]
 
     public init(
@@ -217,6 +219,7 @@ public actor ScanEngine {
     /// Quit path: cancel every task, clear the queue, bump every generation
     /// so in-flight walkers can never emit again. Synchronous — no awaiting.
     public func cancelAll() {
+        isShutDown = true
         for task in inFlight.values { task.cancel() }
         for task in watchdogs.values { task.cancel() }
         inFlight.removeAll()
@@ -251,9 +254,12 @@ public actor ScanEngine {
     /// FIFO with per-trigger width: the head starts only while fewer than
     /// `trigger.width` walkers are in flight (2 scheduled / 3 otherwise).
     private func startQueuedIfPossible() {
-        while let next = pendingQueue.first, inFlight.count < next.trigger.width {
-            pendingQueue.removeFirst()
-            startScan(next)
+        guard !isShutDown else { return }
+        // Width-aware pop, not strict FIFO: a queued `.manual` (width 3)
+        // must not wait behind a `.scheduled` head (width 2) that the
+        // current in-flight count blocks.
+        while let index = pendingQueue.firstIndex(where: { inFlight.count < $0.trigger.width }) {
+            startScan(pendingQueue.remove(at: index))
         }
     }
 
@@ -305,6 +311,10 @@ public actor ScanEngine {
         states[category] = .idle
         gate.bump(category)
         lastDiscovered[category] = nil
+        // After cancelAll (quit path) the engine must stay quiet: a clean
+        // finishing post-shutdown would otherwise respawn a post-clean
+        // walker whose stats update can land after the app's final flush.
+        guard !isShutDown else { return }
         enqueue(category, trigger: .postClean)
         startQueuedIfPossible()
     }
