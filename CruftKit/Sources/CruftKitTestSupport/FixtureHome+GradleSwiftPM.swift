@@ -1,4 +1,3 @@
-import CruftKitTestSupport
 import Foundation
 
 /// Fixture recipes for GradleSource and SwiftPMCacheSource, built ONLY on
@@ -10,7 +9,7 @@ extension FixtureHome {
     /// (re-downloading Gradle itself is expensive; not in v1) and the
     /// `gradle.properties` configuration file.
     @discardableResult
-    func plantGradleFixture(includeDecoys: Bool = true) throws -> (caches: URL, daemon: URL) {
+    public func plantGradleFixture(includeDecoys: Bool = true) throws -> (caches: URL, daemon: URL) {
         let caches = try plantDir(".gradle/caches")
         try plantFile(".gradle/caches/modules-2/files-2.1/com.example/lib/1.0/lib-1.0.jar")
         try plantFile(".gradle/caches/8.7/kotlin-dsl/scripts/abc123/classes.bin")
@@ -27,7 +26,7 @@ extension FixtureHome {
     /// children, plus a sibling decoy cache belonging to another app that
     /// must never be discovered.
     @discardableResult
-    func plantSwiftPMCacheFixture(includeDecoys: Bool = true) throws -> URL {
+    public func plantSwiftPMCacheFixture(includeDecoys: Bool = true) throws -> URL {
         let root = try plantDir("Library/Caches/org.swift.swiftpm")
         try plantFile("Library/Caches/org.swift.swiftpm/repositories/swift-argument-parser-abc123/HEAD")
         try plantFile("Library/Caches/org.swift.swiftpm/manifests/ManifestLoading/manifest.db")

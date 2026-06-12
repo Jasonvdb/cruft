@@ -1,4 +1,3 @@
-import CruftKitTestSupport
 import Foundation
 
 /// In-repo build fixture recipes, built only on the frozen DSL primitives.
@@ -8,10 +7,10 @@ import Foundation
 extension FixtureHome {
     /// Relative path of the default projects root under the fixture home,
     /// matching `ScanContext`'s default (`Documents/Repositories`).
-    var projectsRootPath: String { "Documents/Repositories" }
+    public var projectsRootPath: String { "Documents/Repositories" }
 
     /// Absolute URL of `relativePath` resolved under the projects root.
-    func projectURL(_ relativePath: String) -> URL {
+    public func projectURL(_ relativePath: String) -> URL {
         url("\(projectsRootPath)/\(relativePath)")
     }
 
@@ -21,7 +20,7 @@ extension FixtureHome {
     /// inside, everything else as a marker file); `buildDirs` are direct
     /// children planted as directories holding one 4096-byte payload file.
     @discardableResult
-    func plantInRepoProject(
+    public func plantInRepoProject(
         _ relativePath: String,
         markers: [String],
         buildDirs: [String] = []
@@ -44,7 +43,7 @@ extension FixtureHome {
     /// root (used both for real build outputs and for decoys that must not
     /// be discovered).
     @discardableResult
-    func plantBuildDir(_ relativePath: String) throws -> URL {
+    public func plantBuildDir(_ relativePath: String) throws -> URL {
         try plantFile("\(projectsRootPath)/\(relativePath)/payload.o")
         return projectURL(relativePath)
     }

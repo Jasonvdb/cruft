@@ -1,4 +1,3 @@
-import CruftKitTestSupport
 import Foundation
 
 /// Fixture recipes for XcodeMiscSource and JSCacheSource tests, built ONLY
@@ -10,14 +9,14 @@ extension FixtureHome {
 
     /// Plants `Library/Caches/com.apple.dt.Xcode` with one payload file.
     @discardableResult
-    func plantXcodeCacheFixture() throws -> URL {
+    public func plantXcodeCacheFixture() throws -> URL {
         try plantFile("Library/Caches/com.apple.dt.Xcode/fsCachedData/payload.bin")
         return url("Library/Caches/com.apple.dt.Xcode")
     }
 
     /// Plants `Library/Developer/CoreSimulator/Caches` with one payload file.
     @discardableResult
-    func plantSimulatorCachesFixture() throws -> URL {
+    public func plantSimulatorCachesFixture() throws -> URL {
         try plantFile("Library/Developer/CoreSimulator/Caches/dyld/payload.bin")
         return url("Library/Developer/CoreSimulator/Caches")
     }
@@ -27,7 +26,7 @@ extension FixtureHome {
     /// re-derivable) and additionally denylisted in SafeDeleter — no source
     /// may ever discover them or cover them with an allowed root.
     @discardableResult
-    func plantSimulatorDeviceDecoy(
+    public func plantSimulatorDeviceDecoy(
         uuid: String = "8A1B2C3D-0000-4444-8888-CAFEBABED00D"
     ) throws -> URL {
         try plantFile("Library/Developer/CoreSimulator/Devices/\(uuid)/data/Documents/precious.txt")
@@ -38,7 +37,7 @@ extension FixtureHome {
 
     /// Plants `.npm/_cacache` with one payload file.
     @discardableResult
-    func plantNpmCacacheFixture() throws -> URL {
+    public func plantNpmCacacheFixture() throws -> URL {
         try plantFile(".npm/_cacache/content-v2/sha512/payload.bin")
         return url(".npm/_cacache")
     }
@@ -47,7 +46,7 @@ extension FixtureHome {
     /// `.npmrc` sibling file — configuration and logs, not cache. Returns
     /// the URLs that must never be discovered.
     @discardableResult
-    func plantNpmDecoys() throws -> [URL] {
+    public func plantNpmDecoys() throws -> [URL] {
         try plantFile(".npm/_logs/2026-06-12T00_00_00_000Z-debug-0.log")
         try plantFile(".npmrc")
         return [url(".npm/_logs"), url(".npmrc")]
@@ -55,21 +54,21 @@ extension FixtureHome {
 
     /// Plants `Library/Caches/Yarn` with one payload file.
     @discardableResult
-    func plantYarnCacheFixture() throws -> URL {
+    public func plantYarnCacheFixture() throws -> URL {
         try plantFile("Library/Caches/Yarn/v6/payload.bin")
         return url("Library/Caches/Yarn")
     }
 
     /// Plants `Library/Caches/pnpm` with one payload file.
     @discardableResult
-    func plantPnpmCacheFixture() throws -> URL {
+    public func plantPnpmCacheFixture() throws -> URL {
         try plantFile("Library/Caches/pnpm/metadata/registry.npmjs.org/payload.json")
         return url("Library/Caches/pnpm")
     }
 
     /// Plants `Library/pnpm/store` with one payload file.
     @discardableResult
-    func plantPnpmStoreFixture() throws -> URL {
+    public func plantPnpmStoreFixture() throws -> URL {
         try plantFile("Library/pnpm/store/v3/files/00/payload")
         return url("Library/pnpm/store")
     }
@@ -77,7 +76,7 @@ extension FixtureHome {
     /// Decoy: `Library/pnpm/global` holds globally installed packages —
     /// user-installed state, not cache; never discovered.
     @discardableResult
-    func plantPnpmGlobalDecoy() throws -> URL {
+    public func plantPnpmGlobalDecoy() throws -> URL {
         try plantFile("Library/pnpm/global/5/package.json")
         return url("Library/pnpm/global")
     }

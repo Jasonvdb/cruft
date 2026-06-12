@@ -61,7 +61,7 @@ struct Scan: AsyncParsableCommand {
     var json = false
 
     func run() async throws {
-        throw CleanExit.message("scan: not implemented (Phase 3)")
+        try await runScan()
     }
 }
 
@@ -81,8 +81,13 @@ struct Clean: AsyncParsableCommand {
     @Flag(name: .customLong("yes"), help: "Actually delete. Without this flag clean only performs a dry run.")
     var yes = false
 
+    /// Hidden second gate for live cleans of the REAL home directory;
+    /// fixture homes under the system temp areas need only `--yes`.
+    @Flag(name: .customLong("really"), help: .hidden)
+    var really = false
+
     func run() async throws {
-        throw CleanExit.message("clean: not implemented (Phase 3)")
+        try await runClean()
     }
 }
 
@@ -95,6 +100,6 @@ struct Fixture: AsyncParsableCommand {
     var path: String
 
     func run() async throws {
-        throw CleanExit.message("fixture: not implemented (Phase 3)")
+        try runFixture()
     }
 }

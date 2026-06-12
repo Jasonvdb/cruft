@@ -12,8 +12,11 @@ import Foundation
 /// - Only snapshots that reached `.finished` are ever stored; cancelled or
 ///   error-flagged walks keep the previous record (an older `updatedAt` is
 ///   the truthful state).
-/// - Unknown `schemaVersion` or decode failure: delete the file and fall
+/// - Unknown `schemaVersion` or decode failure: reset the file and fall
 ///   through to the first-launch flow. Never crash, never half-decode.
+///   (File-removal APIs live only in SafeDeleter, so "reset" atomically
+///   overwrites stats.json with an empty valid `PersistedStats` instead of
+///   deleting it — same first-launch outcome.)
 public actor StatsStore {
     public static let currentSchemaVersion = 1
 
@@ -29,6 +32,11 @@ public actor StatsStore {
     }
 
     private let fileURL: URL
+    /// Coalescing window between `update` and the disk write.
+    private let debounceInterval: Duration
+
+    private var categories: [String: CategorySnapshot] = [:]
+    private var pendingWrite: Task<Void, Never>?
 
     /// `~/Library/Application Support/Cruft/stats.json`
     public static func defaultFileURL() -> URL {
@@ -37,19 +45,115 @@ public actor StatsStore {
     }
 
     public init(fileURL: URL = StatsStore.defaultFileURL()) {
+        self.init(fileURL: fileURL, debounceInterval: .milliseconds(500))
+    }
+
+    /// Test hook: a short debounce makes coalescing observable without
+    /// slowing the suite.
+    init(fileURL: URL, debounceInterval: Duration) {
         self.fileURL = fileURL
+        self.debounceInterval = debounceInterval
     }
 
+    /// Decodes stats.json into memory and returns the stored snapshots
+    /// (sorted by category id for determinism). A missing file is the
+    /// first-launch case; a corrupt or wrong-schema file is reset to an
+    /// empty valid file and treated the same.
     public func load() -> [CategorySnapshot] {
-        fatalError("StatsStore.load not implemented (Phase 3)")
+        guard let data = try? Data(contentsOf: fileURL) else {
+            categories = [:]
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let stats = try? decoder.decode(PersistedStats.self, from: data),
+            stats.schemaVersion == Self.currentSchemaVersion
+        else {
+            categories = [:]
+            writeNow()
+            return []
+        }
+        categories = stats.categories
+        return categories.values.sorted { $0.categoryID.rawValue < $1.categoryID.rawValue }
     }
 
+    /// Merges one FINISHED snapshot and schedules a coalesced write.
+    /// Snapshots without `updatedAt` never reached `.finished` and are
+    /// ignored — the previous record stays the truthful state.
     public func update(_ snapshot: CategorySnapshot) {
-        fatalError("StatsStore.update not implemented (Phase 3)")
+        guard snapshot.updatedAt != nil else { return }
+        categories[snapshot.categoryID.rawValue] = snapshot
+        scheduleWrite()
+    }
+
+    /// Compensating write after a clean: drops deleted items from the
+    /// stored snapshot, zeroes `.contentsOnly` roots whose children were
+    /// deleted, and stamps the result as fresh truth — so quitting before
+    /// the post-clean rescan finishes cannot repaint pre-clean numbers on
+    /// the next launch. Paths are compared with trailing slashes stripped
+    /// (SafeDeleter's returned directory URLs may carry one).
+    public func noteCleaned(category: CategoryID, deletedPaths: [String]) {
+        let deleted = Set(deletedPaths.map(Self.normalized))
+        var snapshot = categories[category.rawValue]
+            ?? CategorySnapshot(categoryID: category)
+        snapshot.items = snapshot.items.compactMap { measured in
+            let path = Self.normalized(measured.item.url.path(percentEncoded: false))
+            if deleted.contains(path) { return nil }
+            if deleted.contains(where: { $0.hasPrefix(path + "/") }) {
+                var zeroed = measured
+                zeroed.size = ItemSize()
+                return zeroed
+            }
+            return measured
+        }
+        snapshot.updatedAt = Date()
+        categories[category.rawValue] = snapshot
+        scheduleWrite()
+    }
+
+    /// A walker persisted a snapshot that a concurrent clean immediately
+    /// invalidated: drop the category's record entirely so the next launch
+    /// rescans instead of trusting either version.
+    public func invalidate(category: CategoryID) {
+        categories.removeValue(forKey: category.rawValue)
+        scheduleWrite()
+    }
+
+    private static func normalized(_ path: String) -> String {
+        path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 
     /// Flush any coalesced write to disk now (quit path).
     public func flush() {
-        fatalError("StatsStore.flush not implemented (Phase 3)")
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        writeNow()
+    }
+
+    private func scheduleWrite() {
+        pendingWrite?.cancel()
+        pendingWrite = Task { [debounceInterval] in
+            try? await Task.sleep(for: debounceInterval)
+            guard !Task.isCancelled else { return }
+            self.completePendingWrite()
+        }
+    }
+
+    private func completePendingWrite() {
+        pendingWrite = nil
+        writeNow()
+    }
+
+    /// Atomic write of the in-memory state. Best-effort: stats are a cache
+    /// of re-derivable numbers, so a failed write degrades to a stale file
+    /// rather than an error path.
+    private func writeNow() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(PersistedStats(categories: categories)) else { return }
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: fileURL, options: .atomic)
     }
 }
