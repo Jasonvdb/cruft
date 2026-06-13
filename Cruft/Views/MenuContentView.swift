@@ -104,7 +104,17 @@ struct MenuContentView: View {
         guard let updated = model.newestDisplayedUpdate else {
             return "Scanning…"
         }
-        let relative = Self.relativeFormatter.localizedString(for: updated, relativeTo: Date())
-        return "Updated \(relative)"
+        return "Updated \(Self.friendlyRelative(updated))"
+    }
+
+    /// Friendlier than `RelativeDateTimeFormatter`'s raw output: the
+    /// sub-minute window is noisy ("22 sec. ago") and, right after a refresh,
+    /// a hair of clock skew makes it read "in 0 sec." — collapse all of it to
+    /// "just now".
+    private static func friendlyRelative(_ date: Date) -> String {
+        if Date().timeIntervalSince(date) < 60 {
+            return "just now"
+        }
+        return relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
