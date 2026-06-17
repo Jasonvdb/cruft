@@ -7,6 +7,7 @@ public enum SourceRegistry {
         [
             DerivedDataSource(),
             InRepoBuildSource(),
+            CargoSource(),
             GradleSource(),
             SwiftPMCacheSource(),
             XcodeMiscSource(),

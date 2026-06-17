@@ -28,6 +28,14 @@ extension FixtureHome {
         try plantInRepoProject("Mobile/android/app", markers: ["build.gradle"], buildDirs: ["build"])
         try plantBuildDir("NoMarker/build")  // decoy: no project marker
 
+        // cargo-target: one standalone crate, plus a workspace whose root
+        // owns target/ while its member crate has a Cargo.toml but no
+        // target/ (2 items). A target/ with no Cargo.toml sibling is a decoy.
+        try plantCargoPackage("pkresolver")
+        try plantCargoPackage("ws")                       // workspace root
+        try plantCargoPackage("ws/crates/core", withTarget: false)  // member
+        try plantBuildDir("MavenLike/target")             // decoy: no Cargo.toml
+
         // gradle: caches + daemon (2 items)
         _ = try plantGradleFixture(includeDecoys: true)
 
@@ -65,6 +73,7 @@ extension FixtureHome {
     public static let canonicalExpectedItemCounts: [String: Int] = [
         "derived-data": 3,
         "in-repo-build": 4,
+        "cargo-target": 2,
         "gradle": 2,
         "swiftpm-cache": 1,
         "xcode-misc": 2,

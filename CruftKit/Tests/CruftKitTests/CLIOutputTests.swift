@@ -8,7 +8,7 @@ import CruftKitTestSupport
 /// spawned; the integrator exercises the binary end-to-end at the gate.
 
 private let allCategoryIDs = [
-    "derived-data", "in-repo-build", "gradle", "swiftpm-cache",
+    "derived-data", "in-repo-build", "cargo-target", "gradle", "swiftpm-cache",
     "xcode-misc", "xcodebuild-mcp", "js-cache", "xcode-archives",
 ]
 
@@ -91,13 +91,13 @@ private func normalizedByteString(_ string: String) -> String {
     let filtered = CLIReportCore.filteredSources(
         all, excluding: [CategoryID("derived-data"), CategoryID("js-cache")])
     #expect(filtered.map { $0.id.rawValue }
-        == ["in-repo-build", "gradle", "swiftpm-cache", "xcode-misc", "xcodebuild-mcp", "xcode-archives"])
+        == ["in-repo-build", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "xcodebuild-mcp", "xcode-archives"])
     #expect(CLIReportCore.filteredSources(all, excluding: []).map { $0.id.rawValue }
         == all.map { $0.id.rawValue })
     #expect(CLIReportCore.filteredSources(all, excluding: [CategoryID("bogus")]).count == all.count)
 }
 
-@Test func unknownCategoryMessageListsAllEightIDs() {
+@Test func unknownCategoryMessageListsAllCategoryIDs() {
     let message = CLIReportCore.unknownCategoryMessage(
         requested: "bogus", sources: SourceRegistry.allSources)
     #expect(message.contains("'bogus'"))
