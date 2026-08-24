@@ -21,25 +21,34 @@ public struct CLIItemReport: Sendable, Equatable, Encodable {
     }
 }
 
-/// One category in the frozen `cruft-cli scan --json` schema. Category order
-/// is registry order; `items` are sorted by path.
+/// One category in the v2 `cruft-cli scan --json` schema. Category
+/// order is registry order; `items` are sorted by path.
 public struct CLICategoryReport: Sendable, Equatable, Encodable {
     public let id: String
     public let displayName: String
+    public let supportsCleaning: Bool
     public let bytes: Int64
     public let itemCount: Int
     public let items: [CLIItemReport]
 
-    public init(id: String, displayName: String, bytes: Int64, itemCount: Int, items: [CLIItemReport]) {
+    public init(
+        id: String,
+        displayName: String,
+        supportsCleaning: Bool,
+        bytes: Int64,
+        itemCount: Int,
+        items: [CLIItemReport]
+    ) {
         self.id = id
         self.displayName = displayName
+        self.supportsCleaning = supportsCleaning
         self.bytes = bytes
         self.itemCount = itemCount
         self.items = items
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, displayName, bytes, itemCount, items
+        case id, displayName, supportsCleaning, bytes, itemCount, items
     }
 }
 
@@ -94,6 +103,7 @@ public enum CLIReportCore {
             reports.append(CLICategoryReport(
                 id: source.id.rawValue,
                 displayName: source.displayName,
+                supportsCleaning: source.supportsCleaning,
                 bytes: itemReports.reduce(0) { $0 + $1.bytes },
                 itemCount: itemReports.count,
                 items: itemReports
@@ -102,7 +112,7 @@ public enum CLIReportCore {
         return reports
     }
 
-    /// The frozen scan JSON document: compact, sorted keys, unescaped
+    /// The v2 scan JSON document: compact, sorted keys, unescaped
     /// slashes, no trailing newline (the caller's `print` supplies it).
     public static func jsonOutput(_ reports: [CLICategoryReport]) throws -> String {
         let encoder = JSONEncoder()
@@ -115,7 +125,10 @@ public enum CLIReportCore {
     /// total line. No trailing whitespace on any line.
     public static func humanScanTable(_ reports: [CLICategoryReport]) -> String {
         var rows = reports.map { report in
-            (name: report.displayName, count: String(report.itemCount), size: formattedBytes(report.bytes))
+            let name = report.supportsCleaning
+                ? report.displayName
+                : "\(report.displayName) (view only)"
+            return (name: name, count: String(report.itemCount), size: formattedBytes(report.bytes))
         }
         rows.append((
             name: "Total",
@@ -191,7 +204,7 @@ public enum CLIReportCore {
     }
 
     /// Percent-decoded absolute path with any trailing slash stripped — the
-    /// spelling the frozen JSON schema requires.
+    /// spelling the v2 JSON schema requires.
     public static func normalizedPath(_ url: URL) -> String {
         var path = url.path(percentEncoded: false)
         while path.count > 1 && path.hasSuffix("/") {

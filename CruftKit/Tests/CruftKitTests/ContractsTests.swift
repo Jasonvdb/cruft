@@ -6,7 +6,9 @@ import CruftKitTestSupport
 private struct DefaultCleaningSource: CacheSource {
     static let id = CategoryID("default-cleaning")
     let displayName = "Default Cleaning"
-    func allowedDeletionRoots(context: ScanContext) -> [URL] { [] }
+    func allowedDeletionRoots(context: ScanContext) -> [URL] {
+        [context.home.appending(path: "default-cleaning")]
+    }
     func discover(context: ScanContext) async throws -> [CacheItem] { [] }
 }
 
@@ -72,6 +74,15 @@ private struct ViewOnlyContractSource: CacheSource {
 @Test func sourcesSupportCleaningByDefault() {
     #expect(DefaultCleaningSource().supportsCleaning)
     #expect(!ViewOnlyContractSource().supportsCleaning)
+}
+
+@Test func scanRootDefaultsToFirstDeletionRootWithoutCreatingOneForViewOnlySources() {
+    let context = ScanContext(home: URL(filePath: "/tmp/cruft-scan-root-contract"))
+    let cleanable = DefaultCleaningSource()
+
+    #expect(cleanable.scanRoot(context: context)
+        == cleanable.allowedDeletionRoots(context: context).first)
+    #expect(ViewOnlyContractSource().scanRoot(context: context) == nil)
 }
 
 @Test func viewOnlySourceRefusesDirectCleanBeforeDeletion() async {

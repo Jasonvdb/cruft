@@ -3,7 +3,7 @@
 A macOS menu bar app that finds the developer build cruft eating your disk —
 and cleans it safely.
 
-<img src="docs/screenshot.png" width="360" alt="cruft menu bar popover showing 113.94 GB of reclaimable space across Xcode DerivedData, project build folders, Gradle, SwiftPM, Xcode and JS package caches, with per-category sizes and a Clean All button">
+<img src="docs/screenshot.png" width="360" alt="cruft menu bar popover showing 113.94 GB of developer storage across Xcode DerivedData, simulator device data, project build folders, Gradle, SwiftPM, Xcode and JS package caches, with per-category sizes and a Clean All button">
 
 Xcode DerivedData, simulator device data, stray in-repo `build/` folders,
 Gradle caches, SwiftPM, and npm/yarn/pnpm caches can quietly grow to **tens or
@@ -114,7 +114,8 @@ swift run --package-path CruftKit cruft-cli clean --category derived-data --yes 
 `clean` is dry-run by default. Deleting from your real home requires an
 extra explicit flag beyond `--yes` (it tells you which). The CLI lists
 `simulator-device-data` in scan totals but always refuses a clean request for
-that category, including dry-run requests.
+that category, including dry-run requests. Human scan output marks it as
+`view only`, and JSON output reports `"supportsCleaning": false`.
 
 ## Extending
 

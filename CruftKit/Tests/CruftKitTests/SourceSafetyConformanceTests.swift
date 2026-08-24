@@ -41,6 +41,25 @@ import CruftKitTestSupport
     }
 }
 
+@Test func conformance_scanRootsResolveUnderHome() throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let context = ScanContext(home: fixture.root)
+    let homePath = canonicalPath(context.home)
+
+    for source in SourceRegistry.allSources {
+        let root = try #require(
+            source.scanRoot(context: context),
+            "\(source.id) does not declare a scan root"
+        )
+        let resolved = canonicalPath(root)
+        #expect(
+            resolved == homePath || resolved.hasPrefix(homePath + "/"),
+            "\(source.id) scan root escapes home: \(resolved)"
+        )
+    }
+}
+
 /// `cruftCanonical` appends a trailing slash to existing directory URLs;
 /// strip it so prefix checks compare like with like (SafeDeleter does the
 /// same internally).

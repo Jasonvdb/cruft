@@ -3,15 +3,15 @@ import CruftKit
 import Foundation
 
 // =============================================================================
-// FROZEN CLI SURFACE (contracts v1): subcommand names, flags, and the scan
-// JSON schema below are frozen in Phase 0 — gates in later phases script
-// against them. Implementations land in Phase 3 (agent 3B).
+// CLI SURFACE (contracts v2): subcommand names and flags remain stable. The
+// scan JSON category schema includes cleaning capability so callers can
+// distinguish cleanable and view-only storage.
 //
 // scan JSON schema:
 // {
 //   "categories": [
 //     { "id": "derived-data", "displayName": "Xcode DerivedData",
-//       "bytes": 123, "itemCount": 2,
+//       "supportsCleaning": true, "bytes": 123, "itemCount": 2,
 //       "items": [ { "path": "/...", "label": "Foo", "bytes": 123, "fileCount": 4 } ] }
 //   ]
 // }
@@ -21,7 +21,7 @@ import Foundation
 struct CruftCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "cruft-cli",
-        abstract: "Scan and clean re-derivable developer build caches.",
+        abstract: "Scan developer storage and clean re-derivable build caches.",
         subcommands: [Scan.self, Clean.self, Fixture.self]
     )
 }
@@ -52,12 +52,12 @@ struct ContextOptions: ParsableArguments {
 
 struct Scan: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Discover and size all cache categories."
+        abstract: "Discover and size all developer storage categories."
     )
 
     @OptionGroup var context: ContextOptions
 
-    @Flag(name: .customLong("json"), help: "Emit machine-readable JSON (schema frozen, see source header).")
+    @Flag(name: .customLong("json"), help: "Emit machine-readable JSON (schema v2, see source header).")
     var json = false
 
     func run() async throws {
@@ -72,7 +72,7 @@ struct Clean: AsyncParsableCommand {
 
     @OptionGroup var context: ContextOptions
 
-    @Option(name: .customLong("category"), help: "Category id to clean (see scan output).")
+    @Option(name: .customLong("category"), help: "Category id to clean (view-only scan categories cannot be cleaned).")
     var category: String
 
     @Flag(name: .customLong("dry-run"), help: "Validate and list what would be deleted (the default behavior).")

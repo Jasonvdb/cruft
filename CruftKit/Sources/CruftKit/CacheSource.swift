@@ -220,6 +220,10 @@ public protocol CacheSource: Sendable {
     /// `false` means the category can be scanned and measured, but no clean
     /// path may delete its items.
     var supportsCleaning: Bool { get }
+    /// Root used for scan safety gates and discovery. This is separate from
+    /// deletion roots so a view-only source can declare what it measures
+    /// without making that path eligible for deletion.
+    func scanRoot(context: ScanContext) -> URL?
     /// Roots every deletion for this category is validated against.
     func allowedDeletionRoots(context: ScanContext) -> [URL]
     /// Fast, sizing-free discovery (existence checks + shallow listings).
@@ -234,6 +238,12 @@ public extension CacheSource {
     var includedInCleanAllByDefault: Bool { true }
     var isDestructive: Bool { false }
     var supportsCleaning: Bool { true }
+
+    /// Existing cleanable sources scan their first deletion root. Sources
+    /// with a different discovery boundary must override this method.
+    func scanRoot(context: ScanContext) -> URL? {
+        allowedDeletionRoots(context: context).first
+    }
 
     @discardableResult
     func clean(item: CacheItem, context: ScanContext, using deleter: any ItemDeleting) async throws -> [URL] {

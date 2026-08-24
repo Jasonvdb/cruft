@@ -16,6 +16,11 @@ public struct SimulatorDeviceDataSource: CacheSource {
 
     public init() {}
 
+    /// The view-only discovery boundary. This does not authorize deletion.
+    public func scanRoot(context: ScanContext) -> URL? {
+        context.home.appending(path: Self.devicesRelativePath)
+    }
+
     /// This source is view only. No path is valid for deletion.
     public func allowedDeletionRoots(context: ScanContext) -> [URL] {
         []
@@ -24,7 +29,17 @@ public struct SimulatorDeviceDataSource: CacheSource {
     /// Discovers only real, direct UUID-named directories. It does not follow
     /// symlinks or search below non-device entries.
     public func discover(context: ScanContext) async throws -> [CacheItem] {
-        let root = context.home.appending(path: Self.devicesRelativePath)
+        guard let declaredRoot = scanRoot(context: context) else { return [] }
+        let root = declaredRoot.cruftCanonical
+        let declaredPath = normalizedPath(declaredRoot)
+        let rootPath = normalizedPath(root)
+        let homePath = normalizedPath(context.home)
+
+        // A different canonical path means a symlink exists in the discovery
+        // chain. Refuse it even if the final Devices component is a directory.
+        guard rootPath == declaredPath,
+            rootPath.hasPrefix(homePath + "/")
+        else { return [] }
         guard isRealDirectory(root) else { return [] }
 
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
@@ -53,6 +68,12 @@ public struct SimulatorDeviceDataSource: CacheSource {
             )
         }
         .sorted { $0.url.path(percentEncoded: false) < $1.url.path(percentEncoded: false) }
+    }
+
+    private func normalizedPath(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path(percentEncoded: false)
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path
     }
 
     private func isRealDirectory(_ url: URL) -> Bool {

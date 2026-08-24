@@ -70,9 +70,33 @@ struct SimulatorDeviceDataSourceTests {
     @Test func viewOnlySourceHasNoDeletionRoots() throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
+        let source = SimulatorDeviceDataSource()
+        let context = ScanContext(home: fixture.root)
 
-        #expect(SimulatorDeviceDataSource().allowedDeletionRoots(
-            context: ScanContext(home: fixture.root)).isEmpty)
+        #expect(source.allowedDeletionRoots(context: context).isEmpty)
+        #expect(source.scanRoot(context: context) == fixture.url(simulatorDevicesPath))
+    }
+
+    @Test func intermediateParentSymlinkIsNotFollowedOutsideHome() async throws {
+        let fixture = try FixtureHome.makeTemporary()
+        let outside = try FixtureHome.makeTemporary()
+        defer {
+            try? fixture.destroy()
+            try? outside.destroy()
+        }
+        _ = try outside.plantSimulatorDeviceDecoy()
+        try fixture.plantDir("Library/Developer")
+        try fixture.plantSymlink(
+            at: "Library/Developer/CoreSimulator",
+            to: outside.url("Library/Developer/CoreSimulator").path(percentEncoded: false)
+        )
+
+        let items = try await SimulatorDeviceDataSource().discover(
+            context: ScanContext(home: fixture.root))
+
+        #expect(items.isEmpty)
+        #expect(outside.exists(
+            "\(simulatorDevicesPath)/8A1B2C3D-0000-4444-8888-CAFEBABED00D/data/Documents/precious.txt"))
     }
 
     @Test func directCleanRefusesWithoutCallingTheDeleter() async throws {
