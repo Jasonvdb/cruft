@@ -76,13 +76,14 @@ public struct CleanPlanner: Sendable {
         var itemsByCategory: [CategoryID: [CacheItem]] = [:]
         var estimatedBytes: Int64 = 0
         var warnings = processWarnings
-        if source(for: category)?.supportsCleaning == true,
+        if let source = source(for: category),
+            source.supportsCleaning,
             let snapshot = snapshots.first(where: { $0.categoryID == category }),
             !snapshot.items.isEmpty
         {
             itemsByCategory[category] = snapshot.items.map(\.item)
             estimatedBytes = snapshot.totalBytes
-            if source(for: category)?.isDestructive == true {
+            if source.isDestructive {
                 warnings.append(Self.destructiveWarning)
             }
         }
