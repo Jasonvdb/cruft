@@ -8,9 +8,10 @@ import Foundation
 /// Per-category planted bytes (payload files only — what a scan reports):
 /// see `canonicalExpectedBytes`.
 extension FixtureHome {
-    /// Plants every category's fixtures plus the standard decoys
+    /// Plants every category's fixtures plus the standard protected entries
     /// (CoreSimulator Devices, DeviceSupport, node_modules, .git, hidden
-    /// dirs) that must survive any clean and never be discovered.
+    /// dirs) that must survive every applicable clean. Simulator Devices are
+    /// discovered only by their view-only source.
     public func plantCanonicalFixtureHome() throws {
         // derived-data: two projects + a shared cache (3 items)
         try plantDerivedDataRoot()
@@ -42,10 +43,11 @@ extension FixtureHome {
         // swiftpm-cache (1 item)
         _ = try plantSwiftPMCacheFixture(includeDecoys: true)
 
-        // xcode-misc: Xcode cache + simulator caches (2 items) + the
-        // critical Devices decoy
+        // xcode-misc: Xcode cache + simulator caches (2 items)
         _ = try plantXcodeCacheFixture()
         _ = try plantSimulatorCachesFixture()
+
+        // simulator-device-data: one protected, view-only device (1 item)
         _ = try plantSimulatorDeviceDecoy()
 
         // xcodebuild-mcp: one workspace (1 item) + the config decoys at the
@@ -77,6 +79,7 @@ extension FixtureHome {
         "gradle": 2,
         "swiftpm-cache": 1,
         "xcode-misc": 2,
+        "simulator-device-data": 1,
         "xcodebuild-mcp": 1,
         "js-cache": 4,
         "xcode-archives": 3,

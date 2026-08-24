@@ -21,15 +21,21 @@ extension FixtureHome {
         return url("Library/Developer/CoreSimulator/Caches")
     }
 
-    /// Decoy: a simulator device's data directory under
-    /// `CoreSimulator/Devices`. Simulator devices are user data (not
-    /// re-derivable) and additionally denylisted in SafeDeleter — no source
-    /// may ever discover them or cover them with an allowed root.
+    /// Plants a simulator device under `CoreSimulator/Devices`. It is a decoy
+    /// for every cleanable source and a real item for the view-only simulator
+    /// device source.
     @discardableResult
     public func plantSimulatorDeviceDecoy(
-        uuid: String = "8A1B2C3D-0000-4444-8888-CAFEBABED00D"
+        uuid: String = "8A1B2C3D-0000-4444-8888-CAFEBABED00D",
+        name: String? = nil
     ) throws -> URL {
         try plantFile("Library/Developer/CoreSimulator/Devices/\(uuid)/data/Documents/precious.txt")
+        if let name {
+            let metadataURL = url("Library/Developer/CoreSimulator/Devices/\(uuid)/device.plist")
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: ["name": name], format: .xml, options: 0)
+            try data.write(to: metadataURL)
+        }
         return url("Library/Developer/CoreSimulator/Devices/\(uuid)/data")
     }
 

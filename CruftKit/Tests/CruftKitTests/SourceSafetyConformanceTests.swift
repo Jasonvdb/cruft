@@ -25,6 +25,12 @@ import CruftKitTestSupport
     let context = ScanContext(home: fixture.root)
 
     for source in SourceRegistry.allSources {
+        if !source.supportsCleaning {
+            #expect(
+                source.allowedDeletionRoots(context: context).isEmpty,
+                "\(source.id) is view only but declares deletion roots"
+            )
+        }
         for root in source.allowedDeletionRoots(context: context) {
             let resolved = root.resolvingSymlinksInPath().path(percentEncoded: false)
             #expect(
@@ -43,7 +49,7 @@ private func canonicalPath(_ url: URL) -> String {
     return path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
 }
 
-@Test func conformance_everyDiscoveredItemSitsUnderAnAllowedRoot() async throws {
+@Test func conformance_everyCleanableItemSitsUnderAnAllowedRoot() async throws {
     let fixture = try FixtureHome.makeTemporary()
     defer { try? fixture.destroy() }
     try fixture.plantCanonicalFixtureHome()
@@ -51,6 +57,10 @@ private func canonicalPath(_ url: URL) -> String {
 
     for source in SourceRegistry.allSources {
         let roots = source.allowedDeletionRoots(context: context).map(canonicalPath)
+        guard source.supportsCleaning else {
+            #expect(roots.isEmpty, "\(source.id) is view only but declares deletion roots")
+            continue
+        }
         for item in try await source.discover(context: context) {
             let path = canonicalPath(item.url)
             #expect(
@@ -72,10 +82,25 @@ private func canonicalPath(_ url: URL) -> String {
     let context = ScanContext(home: fixture.root)
 
     var validatedItems = 0
+    var refusedViewOnlyItems = 0
     for source in SourceRegistry.allSources {
-        let deleter = try SafeDeleter(home: context.home, mode: .dryRun)
         let roots = source.allowedDeletionRoots(context: context)
-        for item in try await source.discover(context: context) {
+        let items = try await source.discover(context: context)
+        guard source.supportsCleaning else {
+            #expect(roots.isEmpty, "\(source.id) is view only but declares deletion roots")
+            let deleter = RecordingDeleter()
+            for item in items {
+                await #expect(throws: CacheSourceError.cleaningUnsupported(source.id)) {
+                    try await source.clean(item: item, context: context, using: deleter)
+                }
+                refusedViewOnlyItems += 1
+            }
+            #expect(await deleter.requests.isEmpty, "\(source.id) called the deleter")
+            continue
+        }
+
+        let deleter = try SafeDeleter(home: context.home, mode: .dryRun)
+        for item in items {
             do {
                 let urls = try await deleter.delete(
                     DeletionRequest(item: item, allowedRoots: roots))
@@ -86,10 +111,15 @@ private func canonicalPath(_ url: URL) -> String {
             }
         }
     }
-    // The canonical fixture plants all 8 categories — a sudden drop to zero
-    // means discovery silently broke, not that the machine is clean.
-    let expectedTotal = FixtureHome.canonicalExpectedItemCounts.values.reduce(0, +)
-    #expect(validatedItems == expectedTotal)
+    // A sudden drop means discovery or a safety contract silently broke.
+    let expectedCleanableTotal = SourceRegistry.allSources
+        .filter(\.supportsCleaning)
+        .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
+    let expectedViewOnlyTotal = SourceRegistry.allSources
+        .filter { !$0.supportsCleaning }
+        .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
+    #expect(validatedItems == expectedCleanableTotal)
+    #expect(refusedViewOnlyItems == expectedViewOnlyTotal)
 }
 
 @Test func conformance_canonicalFixtureItemCountsMatch() async throws {

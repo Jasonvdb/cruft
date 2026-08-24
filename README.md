@@ -5,22 +5,23 @@ and cleans it safely.
 
 <img src="docs/screenshot.png" width="360" alt="cruft menu bar popover showing 113.94 GB of reclaimable space across Xcode DerivedData, project build folders, Gradle, SwiftPM, Xcode and JS package caches, with per-category sizes and a Clean All button">
 
-Xcode DerivedData, stray in-repo `build/` folders, Gradle caches, SwiftPM,
-npm/yarn/pnpm caches: on a machine with a couple dozen projects this quietly
-grows to **tens or hundreds of GB**, and the built-in macOS storage pane is
-slow, incomplete, and lumps in things you should never delete. cruft shows
-the total in your menu bar, keeps it fresh in the background without ever
-making your Mac feel busy, and cleans it with one confirmed click.
+Xcode DerivedData, simulator device data, stray in-repo `build/` folders,
+Gradle caches, SwiftPM, and npm/yarn/pnpm caches can quietly grow to **tens or
+hundreds of GB**. The built-in macOS storage pane is slow, incomplete, and
+lumps in things you should never delete. cruft shows the total in your menu
+bar, keeps it fresh in the background without ever making your Mac feel busy,
+and cleans only the safe categories with one confirmed click.
 
-**Only things that can be derived again are ever touched.** Simulators, iOS
-device support, source code, and anything else you can't get back are off
-limits by design — see [Safety model](#safety-model).
+**Only things that can be derived again are ever deleted.** Simulator device
+data is measured for visibility, but it is never cleaned. iOS device support,
+source code, and anything else you cannot get back are off limits by design —
+see [Safety model](#safety-model).
 
 > 🚧 Pre-release: fully functional and heavily tested against fixture
 > trees, but no notarized binary yet — build from source below. A signed
 > release + Homebrew cask are planned.
 
-## What it cleans
+## What it shows and cleans
 
 | Category | Location | Re-derivable? |
 |---|---|---|
@@ -29,13 +30,16 @@ limits by design — see [Safety model](#safety-model).
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
 | Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** (never Devices) | ✅ regenerates |
+| Simulator device data | `~/Library/Developer/CoreSimulator/Devices` (per device) | 👁 visibility only — included in totals, never cleaned |
 | XcodeBuildMCP workspaces | `~/Library/Developer/XcodeBuildMCP/workspaces` | ✅ rebuilds on next MCP build |
 | JS package caches | `~/.npm/_cacache`, Yarn, pnpm caches/store | ✅ re-downloads |
 | Xcode Archives | `~/Library/Developer/Xcode/Archives` | ⚠️ **NOT re-derivable** (release dSYMs) — excluded from Clean All by default, explicit per-category clean with a red warning |
 
-Never touched: CoreSimulator **Devices**, iOS/watchOS DeviceSupport, Android
-AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper
-distributions, and anything outside your home directory.
+Never deleted: CoreSimulator **Devices**, iOS/watchOS DeviceSupport, Android
+AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper distributions,
+and anything outside your home directory. Simulator device directories appear
+in scan totals, but the row, Clean All, and `cruft-cli clean` cannot delete
+them.
 
 ## Safety model
 
@@ -56,8 +60,8 @@ cruft deletes files, so it is engineered like it.
 - **Adversarially tested.** The test suite includes named attack fixtures —
   symlinks escaping home, symlinks into `.git`, mis-cased denylist
   components on case-insensitive APFS, `..` traversal, depth-floor edges —
-  plus a conformance suite that pushes every item every scanner discovers
-  through the real SafeDeleter in dry-run.
+  plus a conformance suite that pushes every cleanable item through the real
+  SafeDeleter in dry-run and verifies that view-only items refuse deletion.
 - **Nothing is deleted without a confirmation dialog**, which shows exactly
   what will be removed, warns if Xcode or a Gradle daemon is running, and
   requires a second explicit opt-in for the one non-re-derivable category.
@@ -69,7 +73,9 @@ cruft deletes files, so it is engineered like it.
 Scanning ~100 GB of caches without making your Mac feel slow is most of the
 engineering here:
 
-- Sizing is a **pure metadata walk** — file contents are never read.
+- Sizing is a **pure metadata walk** — payload file contents are never read.
+  Simulator discovery can read the small `device.plist` directly in a device
+  directory to show its name.
 - Scheduled scans run at background QoS, which gets kernel-throttled disk
   I/O; user-initiated scans never run above utility priority.
 - A **quiet gate** skips scanning DerivedData while a build is actively
@@ -106,7 +112,9 @@ swift run --package-path CruftKit cruft-cli clean --category derived-data --yes 
 ```
 
 `clean` is dry-run by default. Deleting from your real home requires an
-extra explicit flag beyond `--yes` (it tells you which).
+extra explicit flag beyond `--yes` (it tells you which). The CLI lists
+`simulator-device-data` in scan totals but always refuses a clean request for
+that category, including dry-run requests.
 
 ## Extending
 
@@ -119,7 +127,7 @@ holds any new source to the same safety rules.
 ## Development
 
 ```sh
-swift test --package-path CruftKit        # 162 tests, hermetic (fixture homes in /tmp)
+swift test --package-path CruftKit        # hermetic (fixture homes in /tmp)
 ./Scripts/check-chokepoint.sh             # single-deletion-site invariant
 swift run --package-path CruftKit cruft-cli fixture /tmp/cruft-fixture   # canonical test tree
 ```

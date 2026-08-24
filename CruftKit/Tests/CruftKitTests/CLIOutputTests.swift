@@ -9,7 +9,7 @@ import CruftKitTestSupport
 
 private let allCategoryIDs = [
     "derived-data", "in-repo-build", "cargo-target", "gradle", "swiftpm-cache",
-    "xcode-misc", "xcodebuild-mcp", "js-cache", "xcode-archives",
+    "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "js-cache", "xcode-archives",
 ]
 
 /// ByteCountFormatter varies space (regular vs narrow no-break) and unit
@@ -91,7 +91,7 @@ private func normalizedByteString(_ string: String) -> String {
     let filtered = CLIReportCore.filteredSources(
         all, excluding: [CategoryID("derived-data"), CategoryID("js-cache")])
     #expect(filtered.map { $0.id.rawValue }
-        == ["in-repo-build", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "xcodebuild-mcp", "xcode-archives"])
+        == ["in-repo-build", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "xcode-archives"])
     #expect(CLIReportCore.filteredSources(all, excluding: []).map { $0.id.rawValue }
         == all.map { $0.id.rawValue })
     #expect(CLIReportCore.filteredSources(all, excluding: [CategoryID("bogus")]).count == all.count)
@@ -167,5 +167,6 @@ private func normalizedByteString(_ string: String) -> String {
     #expect(lines.dropFirst().map { String($0.split(separator: ":")[0]) } == allCategoryIDs)
     #expect(lines.contains("derived-data: 3"))
     #expect(lines.contains("xcodebuild-mcp: 1"))
+    #expect(lines.contains("simulator-device-data: 1"))
     #expect(lines.contains("xcode-archives: 3"))
 }
