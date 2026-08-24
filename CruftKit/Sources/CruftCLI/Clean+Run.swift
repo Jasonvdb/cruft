@@ -22,6 +22,10 @@ extension Clean {
                 requested: category, sources: SourceRegistry.allSources))
             throw ExitCode(EX_USAGE)
         }
+        guard source.supportsCleaning else {
+            printToStandardError("clean refused: \(source.displayName) is view only.")
+            throw ExitCode(EX_USAGE)
+        }
 
         let items = try await source.discover(context: scanContext)
             .sorted { $0.url.path(percentEncoded: false) < $1.url.path(percentEncoded: false) }

@@ -20,7 +20,8 @@ public struct CleanPlan: Sendable {
 /// Builds clean plans honoring Clean All membership rules:
 /// a category is in Clean All iff the user explicitly included it, or it is
 /// `includedInCleanAllByDefault` and not user-excluded. Destructive
-/// categories are never in Clean All unless explicitly opted in.
+/// categories are never in Clean All unless explicitly opted in. View-only
+/// categories are never included.
 public struct CleanPlanner: Sendable {
     /// Warning attached to every destructive category in a plan. v1's only
     /// destructive source is Archives; text frozen by the Phase 3 spec.
@@ -45,6 +46,7 @@ public struct CleanPlanner: Sendable {
         for snapshot in snapshots {
             let id = snapshot.categoryID
             guard let source = source(for: id), !snapshot.items.isEmpty else { continue }
+            guard source.supportsCleaning else { continue }
             let included = userIncluded.contains(id)
                 || (!source.isDestructive
                     && source.includedInCleanAllByDefault
@@ -63,9 +65,9 @@ public struct CleanPlanner: Sendable {
         )
     }
 
-    /// Plans one category regardless of Clean All membership flags —
-    /// per-category clean is always available (destructive categories still
-    /// carry their warning).
+    /// Plans one cleanable category regardless of Clean All membership flags.
+    /// View-only categories always produce an empty plan. Destructive
+    /// categories still carry their warning.
     public func planCategory(
         _ category: CategoryID,
         snapshots: [CategorySnapshot],
@@ -74,7 +76,8 @@ public struct CleanPlanner: Sendable {
         var itemsByCategory: [CategoryID: [CacheItem]] = [:]
         var estimatedBytes: Int64 = 0
         var warnings = processWarnings
-        if let snapshot = snapshots.first(where: { $0.categoryID == category }),
+        if source(for: category)?.supportsCleaning == true,
+            let snapshot = snapshots.first(where: { $0.categoryID == category }),
             !snapshot.items.isEmpty
         {
             itemsByCategory[category] = snapshot.items.map(\.item)

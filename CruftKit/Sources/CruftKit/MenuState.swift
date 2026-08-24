@@ -29,6 +29,7 @@ public struct MenuState: Sendable {
         public let id: CategoryID
         public let displayName: String
         public let isDestructive: Bool
+        public let supportsCleaning: Bool
         public internal(set) var bytes: Int64?
         public internal(set) var itemCount: Int?
         public internal(set) var activity: Activity
@@ -40,6 +41,7 @@ public struct MenuState: Sendable {
             id: CategoryID,
             displayName: String,
             isDestructive: Bool,
+            supportsCleaning: Bool,
             bytes: Int64? = nil,
             itemCount: Int? = nil,
             activity: Activity = .idle(updatedAt: nil),
@@ -48,6 +50,7 @@ public struct MenuState: Sendable {
             self.id = id
             self.displayName = displayName
             self.isDestructive = isDestructive
+            self.supportsCleaning = supportsCleaning
             self.bytes = bytes
             self.itemCount = itemCount
             self.activity = activity
@@ -78,6 +81,7 @@ public struct MenuState: Sendable {
                     id: source.id,
                     displayName: source.displayName,
                     isDestructive: source.isDestructive,
+                    supportsCleaning: source.supportsCleaning,
                     bytes: snapshot.totalBytes,
                     itemCount: snapshot.items.count,
                     activity: .idle(updatedAt: snapshot.updatedAt),
@@ -87,7 +91,8 @@ public struct MenuState: Sendable {
                 Row(
                     id: source.id,
                     displayName: source.displayName,
-                    isDestructive: source.isDestructive
+                    isDestructive: source.isDestructive,
+                    supportsCleaning: source.supportsCleaning
                 )
             }
         }

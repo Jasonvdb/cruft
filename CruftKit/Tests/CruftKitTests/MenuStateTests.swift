@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - Fixtures
 
-// MenuState only reads id/displayName/isDestructive. One type per id because
+// MenuState only reads source metadata. One type per id because
 // `CacheSource.id` is a STATIC requirement — the instance `id` accessor in
 // the protocol extension always returns `Self.id`.
 private struct SourceA: CacheSource {
@@ -24,6 +24,7 @@ private struct SourceB: CacheSource {
 private struct SourceC: CacheSource {
     static let id = CategoryID("c")
     let displayName = "C"
+    let supportsCleaning = false
     func allowedDeletionRoots(context: ScanContext) -> [URL] { [] }
     func discover(context: ScanContext) async throws -> [CacheItem] { [] }
 }
@@ -80,7 +81,15 @@ private func row(_ state: MenuState, _ id: String) -> MenuState.Row? {
     #expect(state.rows.map(\.id) == sources.map(\.id))
     #expect(state.rows.map(\.displayName) == sources.map(\.displayName))
     #expect(state.rows.map(\.isDestructive) == sources.map(\.isDestructive))
+    #expect(state.rows.map(\.supportsCleaning) == sources.map(\.supportsCleaning))
     #expect(state.rows.allSatisfy { $0.bytes == 4096 })
+}
+
+@Test func rowPreservesViewOnlyCapability() {
+    let state = MenuState(sources: [SourceA(), SourceC()], persisted: [])
+
+    #expect(row(state, "a")?.supportsCleaning == true)
+    #expect(row(state, "c")?.supportsCleaning == false)
 }
 
 // MARK: - The retention rule

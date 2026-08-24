@@ -1,7 +1,7 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v1) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v2) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
 // =============================================================================
@@ -217,6 +217,9 @@ public protocol CacheSource: Sendable {
     /// `true` means the contents are NOT re-derivable (Archives hold release
     /// dSYMs) — the UI shows a stronger, explicit warning.
     var isDestructive: Bool { get }
+    /// `false` means the category can be scanned and measured, but no clean
+    /// path may delete its items.
+    var supportsCleaning: Bool { get }
     /// Roots every deletion for this category is validated against.
     func allowedDeletionRoots(context: ScanContext) -> [URL]
     /// Fast, sizing-free discovery (existence checks + shallow listings).
@@ -230,11 +233,21 @@ public extension CacheSource {
     var id: CategoryID { Self.id }
     var includedInCleanAllByDefault: Bool { true }
     var isDestructive: Bool { false }
+    var supportsCleaning: Bool { true }
 
     @discardableResult
     func clean(item: CacheItem, context: ScanContext, using deleter: any ItemDeleting) async throws -> [URL] {
-        try await deleter.delete(
+        guard supportsCleaning else {
+            throw CacheSourceError.cleaningUnsupported(id)
+        }
+        return try await deleter.delete(
             DeletionRequest(item: item, allowedRoots: allowedDeletionRoots(context: context))
         )
     }
+}
+
+/// A source-level refusal that prevents direct callers from bypassing the
+/// planner, UI, or CLI capability checks.
+public enum CacheSourceError: Error, Sendable, Equatable {
+    case cleaningUnsupported(CategoryID)
 }
