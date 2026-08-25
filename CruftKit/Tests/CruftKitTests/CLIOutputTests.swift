@@ -109,6 +109,12 @@ private func normalizedByteString(_ string: String) -> String {
     }
 }
 
+@Test func simulatorCLIContractSupportsScanButRefusesBulkClean() throws {
+    let source = try #require(SourceRegistry.source(for: SimulatorDeviceDataSource.id))
+    #expect(source.supportsCleaning)
+    #expect(!source.allowsWholeCategoryCleaning)
+}
+
 @Test func fixturePathGuardAcceptsOnlySystemTempAreas() {
     #expect(CLIReportCore.isAllowedFixturePath(URL(filePath: "/tmp/cruft-fixture-guard-test")))
     #expect(CLIReportCore.isAllowedFixturePath(URL(filePath: "/private/tmp/cruft-fixture-guard-test")))

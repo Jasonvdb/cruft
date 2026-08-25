@@ -50,6 +50,7 @@ public struct ProcessGuard: Sendable {
     /// Categories Xcode actively writes into while building or archiving.
     private static let xcodeCategories: Set<CategoryID> = [
         CategoryID("derived-data"), CategoryID("xcode-misc"), CategoryID("xcode-archives"),
+        CategoryID("simulator-device-data"),
     ]
     private static let gradleCategory = CategoryID("gradle")
     private static let xcodeBundleID = "com.apple.dt.Xcode"

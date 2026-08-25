@@ -263,6 +263,39 @@ private func makeFakeEngine(
 
 // MARK: - Clean interlock
 
+@Test func simulatorWholeCategoryCleanIsRefusedButExplicitSubsetRuns() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let deleter = RecordingDeleter()
+    let engine = ScanEngine(
+        sources: [SimulatorDeviceDataSource()],
+        context: ScanContext(home: fixture.root),
+        deleter: deleter)
+
+    await #expect(throws: ScanEngineError.wholeCategoryCleaningUnsupported(
+        SimulatorDeviceDataSource.id)) {
+        try await engine.clean(category: SimulatorDeviceDataSource.id)
+    }
+
+    let udid = "11111111-1111-4111-8111-111111111111"
+    let item = CacheItem(
+        categoryID: SimulatorDeviceDataSource.id,
+        url: fixture.url("Library/Developer/CoreSimulator/Devices/\(udid)"),
+        label: "iPhone 17 Pro",
+        deletionMode: .simulatorDevice,
+        simulatorMetadata: SimulatorDeviceMetadata(
+            udid: udid,
+            mainGroup: .xcode,
+            runtimeLabel: "iOS 26.4",
+            isBooted: false,
+            isDeletable: true))
+
+    let outcome = try await engine.clean(
+        category: SimulatorDeviceDataSource.id, items: [item])
+    #expect(outcome.deletedPaths == [item.url.path(percentEncoded: false)])
+    #expect(await deleter.requests.count == 1)
+}
+
 @Test func cleanDuringScanCancelsItAndPostCleanRescanReportsFreedSpace() async throws {
     let fixture = try FixtureHome.makeTemporary()
     defer { try? fixture.destroy() }

@@ -20,6 +20,8 @@ public enum ScanEngineError: Error, Equatable {
     case unknownCategory(CategoryID)
     /// A clean of this category is already in flight.
     case cleanAlreadyRunning(CategoryID)
+    /// This source requires an explicit item subset.
+    case wholeCategoryCleaningUnsupported(CategoryID)
 }
 
 /// Orchestrates discovery, sizing, and cleaning. Key invariants (frozen):
@@ -180,6 +182,12 @@ public actor ScanEngine {
     public func clean(category: CategoryID, items: [CacheItem]? = nil) async throws -> CleanOutcome {
         guard let source = source(for: category) else {
             throw ScanEngineError.unknownCategory(category)
+        }
+        if items == nil, !source.allowsWholeCategoryCleaning {
+            throw ScanEngineError.wholeCategoryCleaningUnsupported(category)
+        }
+        if let invalid = items?.first(where: { !source.canClean(item: $0) }) {
+            throw CacheSourceError.itemCleaningUnsupported(category, invalid.id)
         }
         guard states[category, default: .idle] != .cleaning else {
             throw ScanEngineError.cleanAlreadyRunning(category)

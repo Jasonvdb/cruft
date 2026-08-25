@@ -27,13 +27,28 @@ extension FixtureHome {
     @discardableResult
     public func plantSimulatorDeviceDecoy(
         uuid: String = "8A1B2C3D-0000-4444-8888-CAFEBABED00D",
-        name: String? = nil
+        name: String? = nil,
+        deviceType: String? = nil,
+        runtime: String? = nil,
+        metadataUDID: String? = nil,
+        state: Int? = nil
     ) throws -> URL {
         try plantFile("Library/Developer/CoreSimulator/Devices/\(uuid)/data/Documents/precious.txt")
-        if let name {
+        let metadataValues: [(String, Any?)] = [
+            ("name", name),
+            ("deviceType", deviceType),
+            ("runtime", runtime),
+            ("UDID", metadataUDID),
+            ("state", state),
+        ]
+        let dictionary = Dictionary(
+            uniqueKeysWithValues: metadataValues.compactMap { key, value in
+                value.map { (key, $0) }
+            })
+        if !dictionary.isEmpty {
             let metadataURL = url("Library/Developer/CoreSimulator/Devices/\(uuid)/device.plist")
             let data = try PropertyListSerialization.data(
-                fromPropertyList: ["name": name], format: .xml, options: 0)
+                fromPropertyList: dictionary, format: .xml, options: 0)
             try data.write(to: metadataURL)
         }
         return url("Library/Developer/CoreSimulator/Devices/\(uuid)/data")

@@ -10,9 +10,11 @@ import Foundation
 /// bundle is one `.entireItem`; the Archives directory itself always survives.
 public struct ArchivesSource: CacheSource {
     public static let id = CategoryID("xcode-archives")
+    public static let warning = "Archives contain release dSYMs and CANNOT be re-derived."
     public let displayName = "Xcode Archives"
     public let includedInCleanAllByDefault = false
     public let isDestructive = true
+    public let destructiveWarning: String? = Self.warning
 
     public init() {}
 

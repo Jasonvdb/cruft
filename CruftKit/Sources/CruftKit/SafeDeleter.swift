@@ -20,6 +20,63 @@ public enum SafeDeleterError: Error, Equatable {
     case doesNotExist(String)
     /// Rule 7: not owned by the current user.
     case notOwnedByCurrentUser(String)
+    /// Simulator mode: the target, root, metadata, or current state is not an
+    /// exact safe match for one registered shutdown simulator.
+    case simulatorTargetInvalid(String)
+    /// Simulator mode: a booted device must never be deleted.
+    case simulatorBooted(String)
+    /// Simulator mode: `simctl delete` failed and no deletion is recorded.
+    case simulatorDeleteFailed(String)
+}
+
+/// Injectable command seam for the one real-home simulator mutation.
+public protocol SimulatorDeviceCommandRunning: Sendable {
+    func deleteSimulator(udid: String) throws
+}
+
+public struct SimctlSimulatorDeviceCommandRunner: SimulatorDeviceCommandRunning {
+    struct Result: Sendable {
+        let status: Int32
+        let errorText: String
+    }
+
+    enum CommandError: Error, Equatable {
+        case failed(Int32, String)
+    }
+
+    private let operation: @Sendable (String) throws -> Result
+
+    public init() {
+        self.operation = Self.runCommand
+    }
+
+    init(operation: @escaping @Sendable (String) throws -> Result) {
+        self.operation = operation
+    }
+
+    public func deleteSimulator(udid: String) throws {
+        let result = try operation(udid)
+        guard result.status == 0 else {
+            throw CommandError.failed(result.status, result.errorText)
+        }
+    }
+
+    private static func runCommand(udid: String) throws -> Result {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "delete", udid]
+        process.standardOutput = FileHandle.nullDevice
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let rawError = String(decoding: errorData.prefix(1024), as: UTF8.self)
+        let errorText = rawError
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Result(status: process.terminationStatus, errorText: errorText)
+    }
 }
 
 /// THE deletion choke point. The only file in the repository where
@@ -55,11 +112,18 @@ public actor SafeDeleter: ItemDeleting {
     /// Canonical effective home path (trailing slash stripped) — the
     /// right-hand side of every rule-1 and rule-5 comparison.
     private let homePath: String
+    private let isRealHome: Bool
+    private let simulatorCommandRunner: any SimulatorDeviceCommandRunning
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
     ///   or lives under a system temp area (fixtures).
-    public init(home: URL, mode: Mode) throws {
+    public init(
+        home: URL,
+        mode: Mode,
+        simulatorCommandRunner: any SimulatorDeviceCommandRunning =
+            SimctlSimulatorDeviceCommandRunner()
+    ) throws {
         self.mode = mode
         let candidate = Self.normalizedPath(home.cruftCanonical)
         let realHome = Self.normalizedPath(
@@ -70,6 +134,8 @@ public actor SafeDeleter: ItemDeleting {
             throw SafeDeleterError.homeOverrideRefused(candidate)
         }
         self.homePath = candidate
+        self.isRealHome = candidate == realHome
+        self.simulatorCommandRunner = simulatorCommandRunner
     }
 
     @discardableResult
@@ -79,6 +145,10 @@ public actor SafeDeleter: ItemDeleting {
         let targetPath = Self.normalizedPath(target.canonicalURL)
 
         try checkInsideHome(targetPath)
+        if item.deletionMode == .simulatorDevice {
+            return try deleteSimulator(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
         try Self.checkDenylist(targetPath)
         try Self.checkAllowedRoots(
             targetPath, roots: request.allowedRoots, mode: item.deletionMode)
@@ -94,6 +164,8 @@ public actor SafeDeleter: ItemDeleting {
             let children = try validatedChildren(of: target.canonicalURL)
             try perform(children)
             return children
+        case .simulatorDevice:
+            preconditionFailure("simulator deletion returned before the generic switch")
         }
     }
 
@@ -102,6 +174,7 @@ public actor SafeDeleter: ItemDeleting {
     private struct Inspection {
         let canonicalURL: URL
         let isSymlink: Bool
+        let isDirectory: Bool
         let ownerUID: uid_t?
     }
 
@@ -123,11 +196,110 @@ public actor SafeDeleter: ItemDeleting {
             throw SafeDeleterError.doesNotExist(rawPath)
         }
         let isSymlink = attributes[.type] as? FileAttributeType == .typeSymbolicLink
+        let isDirectory = attributes[.type] as? FileAttributeType == .typeDirectory
         let canonicalURL: URL = isSymlink
             ? url.deletingLastPathComponent().cruftCanonical.appending(path: url.lastPathComponent)
             : url.cruftCanonical
         let ownerUID = (attributes[.ownerAccountID] as? NSNumber).map { uid_t($0.uint32Value) }
-        return Inspection(canonicalURL: canonicalURL, isSymlink: isSymlink, ownerUID: ownerUID)
+        return Inspection(
+            canonicalURL: canonicalURL,
+            isSymlink: isSymlink,
+            isDirectory: isDirectory,
+            ownerUID: ownerUID)
+    }
+
+    /// Simulator deletion has a narrower contract than ordinary file removal.
+    /// It keeps `Devices` denylisted for every other deletion mode and permits
+    /// only one direct UUID child of the exact CoreSimulator Devices root.
+    private func deleteSimulator(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) throws -> [URL] {
+        let expectedRoot = URL(filePath: homePath, directoryHint: .isDirectory)
+            .appending(path: "Library/Developer/CoreSimulator/Devices")
+        let expectedRootPath = Self.normalizedStandardizedPath(expectedRoot)
+        let canonicalExpectedRootPath = Self.normalizedPath(expectedRoot.cruftCanonical)
+        let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
+
+        guard canonicalExpectedRootPath == expectedRootPath else {
+            throw SafeDeleterError.simulatorTargetInvalid("symlinked root: \(expectedRootPath)")
+        }
+        guard request.allowedRoots.count == 1,
+            Self.normalizedPath(request.allowedRoots[0].cruftCanonical) == expectedRootPath
+        else {
+            throw SafeDeleterError.simulatorTargetInvalid("wrong allowed root: \(rawTargetPath)")
+        }
+        guard rawTargetPath == canonicalTargetPath else {
+            throw SafeDeleterError.simulatorTargetInvalid("symlinked target: \(rawTargetPath)")
+        }
+        let rawParentPath = Self.normalizedStandardizedPath(
+            request.item.url.deletingLastPathComponent())
+        guard rawParentPath == expectedRootPath else {
+            throw SafeDeleterError.simulatorTargetInvalid("not a direct child: \(rawTargetPath)")
+        }
+        guard target.isDirectory, !target.isSymlink else {
+            throw SafeDeleterError.simulatorTargetInvalid("not a real directory: \(rawTargetPath)")
+        }
+
+        let udid = request.item.url.lastPathComponent
+        guard UUID(uuidString: udid) != nil,
+            request.item.categoryID == SimulatorDeviceDataSource.id,
+            let itemMetadata = request.item.simulatorMetadata,
+            UUID(uuidString: itemMetadata.udid) == UUID(uuidString: udid),
+            itemMetadata.mainGroup != .unknown,
+            itemMetadata.runtimeLabel != "Unknown",
+            !itemMetadata.isBooted,
+            itemMetadata.isDeletable
+        else {
+            throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
+        }
+        try Self.validateOwnership(
+            ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
+
+        let metadata = target.canonicalURL.appending(path: "device.plist")
+        let metadataKeys: Set<URLResourceKey> = [
+            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+        ]
+        guard let values = try? metadata.resourceValues(forKeys: metadataKeys),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let size = values.fileSize,
+            size <= 64 * 1024,
+            let data = try? Data(contentsOf: metadata),
+            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+            let dictionary = plist as? [String: Any],
+            let metadataUDID = dictionary["UDID"] as? String,
+            UUID(uuidString: metadataUDID) == UUID(uuidString: udid),
+            let state = (dictionary["state"] as? NSNumber)?.intValue
+        else {
+            throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
+        }
+        if state == 3 {
+            throw SafeDeleterError.simulatorBooted(udid)
+        }
+        guard state == 1 else {
+            throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
+        }
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        if isRealHome {
+            do {
+                try simulatorCommandRunner.deleteSimulator(udid: udid)
+            } catch {
+                throw SafeDeleterError.simulatorDeleteFailed(String(describing: error))
+            }
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+
+        // Fixture homes have no CoreSimulator registration. Remove only the
+        // exact validated fixture directory through this same choke point.
+        try perform([target.canonicalURL])
+        return [target.canonicalURL]
     }
 
     /// Enumerates DIRECT children (hidden files included) of a
@@ -221,6 +393,14 @@ public actor SafeDeleter: ItemDeleting {
     /// trailing slash stripped, so directory URLs from different APIs agree.
     private static func normalizedPath(_ url: URL) -> String {
         var path = url.path(percentEncoded: false)
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
+    private static func normalizedStandardizedPath(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path(percentEncoded: false)
         while path.count > 1 && path.hasSuffix("/") {
             path.removeLast()
         }

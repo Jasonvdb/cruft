@@ -102,6 +102,7 @@ private func canonicalPath(_ url: URL) -> String {
 
     var validatedItems = 0
     var refusedViewOnlyItems = 0
+    var refusedIneligibleItems = 0
     for source in SourceRegistry.allSources {
         let roots = source.allowedDeletionRoots(context: context)
         let items = try await source.discover(context: context)
@@ -120,9 +121,15 @@ private func canonicalPath(_ url: URL) -> String {
 
         let deleter = try SafeDeleter(home: context.home, mode: .dryRun)
         for item in items {
+            guard source.canClean(item: item) else {
+                await #expect(throws: CacheSourceError.itemCleaningUnsupported(source.id, item.id)) {
+                    try await source.clean(item: item, context: context, using: deleter)
+                }
+                refusedIneligibleItems += 1
+                continue
+            }
             do {
-                let urls = try await deleter.delete(
-                    DeletionRequest(item: item, allowedRoots: roots))
+                let urls = try await source.clean(item: item, context: context, using: deleter)
                 #expect(!urls.isEmpty, "\(item.id) validated but deletes nothing")
                 validatedItems += 1
             } catch {
@@ -132,13 +139,14 @@ private func canonicalPath(_ url: URL) -> String {
     }
     // A sudden drop means discovery or a safety contract silently broke.
     let expectedCleanableTotal = SourceRegistry.allSources
-        .filter(\.supportsCleaning)
+        .filter { $0.supportsCleaning && $0.allowsWholeCategoryCleaning }
         .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
     let expectedViewOnlyTotal = SourceRegistry.allSources
         .filter { !$0.supportsCleaning }
         .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
     #expect(validatedItems == expectedCleanableTotal)
     #expect(refusedViewOnlyItems == expectedViewOnlyTotal)
+    #expect(refusedIneligibleItems == FixtureHome.canonicalExpectedItemCounts["simulator-device-data"])
 }
 
 @Test func conformance_canonicalFixtureItemCountsMatch() async throws {
