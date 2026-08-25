@@ -303,6 +303,10 @@ private func makeFakeEngine(
         deletionMode: .simulatorDevice,
         simulatorMetadata: SimulatorDeviceMetadata(
             udid: udid,
+            name: "iPhone 17 Pro",
+            deviceTypeIdentifier:
+                "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+            runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
             mainGroup: .xcode,
             runtimeLabel: "iOS 26.4",
             isBooted: false,
@@ -379,6 +383,29 @@ private func makeFakeEngine(
         itemB.url.path(percentEncoded: false),
     ])
     #expect(Set(failure.outcome.deletedPaths + retryOutcome.deletedPaths).count == 2)
+}
+
+@Test func cleanRetryPolicyRequiresProgressAndReportsExhaustion() throws {
+    let category = CategoryID("retry-test")
+    let item = CacheItem(
+        categoryID: category,
+        url: URL(filePath: "/tmp/fixture/retry-test/item-a"),
+        label: "item-a")
+
+    #expect(throws: CleanRetryError.missingPathNotInRemainingItems(
+        "/tmp/fixture/retry-test/not-planned")) {
+        _ = try CleanRetryPolicy.removingMissingItem(
+            at: "/tmp/fixture/retry-test/not-planned",
+            from: [item])
+    }
+
+    let removed = try CleanRetryPolicy.removingMissingItem(
+        at: item.url.path(percentEncoded: false) + "/",
+        from: [item])
+    #expect(removed.isEmpty)
+    #expect(CleanRetryPolicy.terminalError(remainingItems: removed) == nil)
+    #expect(CleanRetryPolicy.terminalError(remainingItems: [item])
+        == .retryLimitExceeded(remainingItemCount: 1))
 }
 
 @Test func cleanDuringScanCancelsItAndPostCleanRescanReportsFreedSpace() async throws {

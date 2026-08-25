@@ -64,7 +64,7 @@ struct SimulatorDeviceMetadataReader: Sendable {
         let runtime = safeString(
             dictionary["runtime"], maximumLength: Self.maximumIdentifierLength)
         let metadataUDID = safeString(dictionary["UDID"], maximumLength: 36)
-        let state = (dictionary["state"] as? NSNumber)?.intValue
+        let state = safeState(dictionary["state"])
         let runtimeLabel = runtime.flatMap(Self.runtimeLabel) ?? "Unknown"
         let udidMatches = metadataUDID.flatMap(UUID.init(uuidString:))
             == UUID(uuidString: leafUDID)
@@ -126,6 +126,22 @@ struct SimulatorDeviceMetadataReader: Sendable {
             string.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
         else { return nil }
         return string
+    }
+
+    /// Property-list Booleans and reals also bridge to NSNumber. Accept only
+    /// a native integer representation so `true` and `1.5` cannot become the
+    /// shutdown state through NSNumber.intValue truncation.
+    private func safeState(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+            CFGetTypeID(number) != CFBooleanGetTypeID(),
+            !CFNumberIsFloatType(number)
+        else { return nil }
+
+        var exactValue: Int64 = 0
+        guard CFNumberGetValue(number, .sInt64Type, &exactValue),
+            (0...4).contains(exactValue)
+        else { return nil }
+        return Int(exactValue)
     }
 
     private static func runtimeLabel(_ identifier: String) -> String? {

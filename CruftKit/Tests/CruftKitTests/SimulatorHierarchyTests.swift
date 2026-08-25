@@ -20,6 +20,11 @@ private func simulatorItem(
             deletionMode: .simulatorDevice,
             simulatorMetadata: SimulatorDeviceMetadata(
                 udid: udid,
+                name: name,
+                deviceTypeIdentifier:
+                    "com.apple.CoreSimulator.SimDeviceType.Test-\(index)",
+                runtimeIdentifier:
+                    "com.apple.CoreSimulator.SimRuntime.Test-\(index)",
                 mainGroup: mainGroup,
                 runtimeLabel: runtime,
                 isBooted: isBooted,
@@ -102,6 +107,32 @@ private func hierarchy(_ items: [MeasuredItem]) -> SimulatorHierarchy {
     #expect(unknown.runtimeLabel == "Unknown")
     #expect(unknown.blockingReasons == [.unknownMetadata])
     #expect(!unknown.isDeletable)
+}
+
+@Test func v3SnapshotWithoutExactIdentityRemainsVisibleButCannotDelete() throws {
+    let udid = "77777777-7777-4777-8777-777777777777"
+    let measured = MeasuredItem(
+        item: CacheItem(
+            categoryID: SimulatorDeviceDataSource.id,
+            url: URL(filePath: "/tmp/fixture/CoreSimulator/Devices/\(udid)"),
+            label: "Legacy custom simulator",
+            deletionMode: .simulatorDevice,
+            simulatorMetadata: SimulatorDeviceMetadata(
+                udid: udid,
+                mainGroup: .other,
+                runtimeLabel: "iOS 26.5",
+                isBooted: false,
+                isDeletable: true)),
+        size: ItemSize(allocatedBytes: 4096, fileCount: 1))
+
+    let result = hierarchy([measured])
+    let other = try #require(result.sections.first { $0.mainGroup == .other })
+    let group = try #require(other.runtimeGroups.first)
+
+    #expect(group.runtimeLabel == "iOS 26.5")
+    #expect(group.deviceCount == 1)
+    #expect(group.blockingReasons == [.unknownMetadata])
+    #expect(!group.isDeletable)
 }
 
 @Test func unknownAndNotReadyReasonsAreStable() throws {

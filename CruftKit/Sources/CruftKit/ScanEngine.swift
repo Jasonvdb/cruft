@@ -49,6 +49,61 @@ public enum ScanEngineError: Error, Equatable {
     case wholeCategoryCleaningUnsupported(CategoryID)
 }
 
+/// A bounded app clean retry could not make safe progress.
+public enum CleanRetryError: Error, Sendable, Equatable, CustomStringConvertible {
+    /// `SafeDeleter` reported a missing path that was not one of the exact
+    /// items still covered by the confirmed plan.
+    case missingPathNotInRemainingItems(String)
+    /// The bounded loop ended while confirmed plan items were still pending.
+    case retryLimitExceeded(remainingItemCount: Int)
+
+    public var description: String {
+        switch self {
+        case .missingPathNotInRemainingItems(let path):
+            "Clean retry stopped because the missing path was not in the remaining plan: \(path)"
+        case .retryLimitExceeded(let count):
+            "Clean retry limit reached with \(count) item(s) remaining."
+        }
+    }
+}
+
+/// Pure retry rules shared by the app and CruftKit tests.
+public enum CleanRetryPolicy {
+    /// Removes one or more exact remaining items matching `path`. A mismatch
+    /// is an error instead of a no-progress retry.
+    public static func removingMissingItem(
+        at path: String,
+        from remainingItems: [CacheItem]
+    ) throws -> [CacheItem] {
+        let missingPath = normalizedPath(path)
+        let retained = remainingItems.filter {
+            normalizedPath($0.url.path(percentEncoded: false)) != missingPath
+        }
+        guard retained.count < remainingItems.count else {
+            throw CleanRetryError.missingPathNotInRemainingItems(missingPath)
+        }
+        return retained
+    }
+
+    /// Returns an explicit terminal error whenever a bounded retry loop exits
+    /// with items still pending.
+    public static func terminalError(
+        remainingItems: [CacheItem]
+    ) -> CleanRetryError? {
+        remainingItems.isEmpty
+            ? nil
+            : .retryLimitExceeded(remainingItemCount: remainingItems.count)
+    }
+
+    private static func normalizedPath(_ rawPath: String) -> String {
+        var path = rawPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+}
+
 /// Orchestrates discovery, sizing, and cleaning. Key invariants (frozen):
 ///
 /// - Per-category UNSTRUCTURED `Task(priority:)` handles in an in-flight map;
@@ -520,13 +575,18 @@ public actor ScanEngine {
         if gate.isCurrent(generation, for: category) {
             gate.emit(.finished(category, snapshot), category: category, generation: generation)
             if let statsStore {
-                await statsStore.update(snapshot)
+                let updateToken = await statsStore.update(snapshot)
                 // The await above is a suspension point: a clean() may have
                 // started (bumping the generation) while this walker was
                 // suspended, making the just-persisted snapshot pre-clean
-                // truth. Re-check and compensate rather than persist fiction.
-                if !gate.isCurrent(generation, for: category) {
-                    await statsStore.invalidate(category: category)
+                // truth. Re-check and remove only this walker's own write. A
+                // later clean remainder or finished scan must survive.
+                if let updateToken,
+                    !gate.isCurrent(generation, for: category)
+                {
+                    await statsStore.invalidate(
+                        category: category,
+                        ifCurrent: updateToken)
                 }
             }
         }

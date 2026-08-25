@@ -20,6 +20,14 @@ import Foundation
 public actor StatsStore {
     public static let currentSchemaVersion = 1
 
+    /// In-memory identity of one accepted snapshot update. Tokens are not
+    /// persisted; they only let a suspended scan compare-and-invalidate its
+    /// own write without removing a later clean remainder or scan result.
+    public struct SnapshotUpdateToken: Sendable, Hashable {
+        fileprivate let categoryID: CategoryID
+        fileprivate let identity: UUID
+    }
+
     public struct PersistedStats: Sendable, Codable {
         public var schemaVersion: Int
         public var categories: [String: CategorySnapshot]
@@ -36,6 +44,7 @@ public actor StatsStore {
     private let debounceInterval: Duration
 
     private var categories: [String: CategorySnapshot] = [:]
+    private var updateTokens: [String: SnapshotUpdateToken] = [:]
     private var pendingWrite: Task<Void, Never>?
 
     /// `~/Library/Application Support/Cruft/stats.json`
@@ -62,6 +71,7 @@ public actor StatsStore {
     public func load() -> [CategorySnapshot] {
         guard let data = try? Data(contentsOf: fileURL) else {
             categories = [:]
+            updateTokens = [:]
             return []
         }
         let decoder = JSONDecoder()
@@ -70,20 +80,32 @@ public actor StatsStore {
             stats.schemaVersion == Self.currentSchemaVersion
         else {
             categories = [:]
+            updateTokens = [:]
             writeNow()
             return []
         }
         categories = stats.categories
+        updateTokens = Dictionary(uniqueKeysWithValues: categories.keys.map { key in
+            let category = CategoryID(key)
+            return (key, SnapshotUpdateToken(categoryID: category, identity: UUID()))
+        })
         return categories.values.sorted { $0.categoryID.rawValue < $1.categoryID.rawValue }
     }
 
     /// Merges one FINISHED snapshot and schedules a coalesced write.
     /// Snapshots without `updatedAt` never reached `.finished` and are
     /// ignored — the previous record stays the truthful state.
-    public func update(_ snapshot: CategorySnapshot) {
-        guard snapshot.updatedAt != nil else { return }
-        categories[snapshot.categoryID.rawValue] = snapshot
+    @discardableResult
+    public func update(_ snapshot: CategorySnapshot) -> SnapshotUpdateToken? {
+        guard snapshot.updatedAt != nil else { return nil }
+        let key = snapshot.categoryID.rawValue
+        let token = SnapshotUpdateToken(
+            categoryID: snapshot.categoryID,
+            identity: UUID())
+        categories[key] = snapshot
+        updateTokens[key] = token
         scheduleWrite()
+        return token
     }
 
     /// Compensating write after a clean: drops deleted items from the
@@ -107,7 +129,9 @@ public actor StatsStore {
             return measured
         }
         snapshot.updatedAt = Date()
-        categories[category.rawValue] = snapshot
+        let key = category.rawValue
+        categories[key] = snapshot
+        updateTokens[key] = SnapshotUpdateToken(categoryID: category, identity: UUID())
         scheduleWrite()
     }
 
@@ -116,7 +140,28 @@ public actor StatsStore {
     /// rescans instead of trusting either version.
     public func invalidate(category: CategoryID) {
         categories.removeValue(forKey: category.rawValue)
+        updateTokens.removeValue(forKey: category.rawValue)
         scheduleWrite()
+    }
+
+    /// Removes a category only when `token` still identifies its current
+    /// in-memory snapshot. A newer `update` or `noteCleaned` replaces the
+    /// token, so an older suspended scan cannot invalidate newer truth.
+    @discardableResult
+    public func invalidate(
+        category: CategoryID,
+        ifCurrent token: SnapshotUpdateToken
+    ) -> Bool {
+        let key = category.rawValue
+        guard token.categoryID == category,
+            updateTokens[key] == token
+        else {
+            return false
+        }
+        categories.removeValue(forKey: key)
+        updateTokens.removeValue(forKey: key)
+        scheduleWrite()
+        return true
     }
 
     private static func normalized(_ path: String) -> String {

@@ -115,11 +115,21 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
         mainGroup != .unknown && !runtimeLabel.isEmpty && runtimeLabel != "Unknown"
     }
 
+    /// Exact discovery-time identity required for delete-time equality checks.
+    /// Older snapshots decode with nil values and remain visible, but they
+    /// cannot be deleted until a fresh scan supplies all three facts.
+    public var hasExactIdentity: Bool {
+        guard let name, let deviceTypeIdentifier, let runtimeIdentifier else {
+            return false
+        }
+        return !name.isEmpty && !deviceTypeIdentifier.isEmpty && !runtimeIdentifier.isEmpty
+    }
+
     /// The shared subgroup, planner, source, and deletion-seam eligibility
     /// rule. SafeDeleter still re-reads device.plist immediately before a
     /// deletion because these retained scan facts can become stale.
     public var isEligibleForDeletion: Bool {
-        hasKnownClassification && !isBooted && isDeletable
+        hasExactIdentity && hasKnownClassification && !isBooted && isDeletable
     }
 }
 

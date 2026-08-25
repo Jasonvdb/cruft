@@ -118,6 +118,8 @@ private struct ViewOnlyContractSource: CacheSource {
 
     #expect(decoded == original)
     #expect(decoded.simulatorMetadata == metadata)
+    #expect(decoded.simulatorMetadata?.hasExactIdentity == true)
+    #expect(decoded.simulatorMetadata?.isEligibleForDeletion == true)
 }
 
 @Test func cacheItemDecodesV3SimulatorMetadataWithoutV4IdentityFacts() throws {
@@ -140,6 +142,8 @@ private struct ViewOnlyContractSource: CacheSource {
     #expect(decoded.simulatorMetadata?.name == nil)
     #expect(decoded.simulatorMetadata?.deviceTypeIdentifier == nil)
     #expect(decoded.simulatorMetadata?.runtimeIdentifier == nil)
+    #expect(decoded.simulatorMetadata?.hasExactIdentity == false)
+    #expect(decoded.simulatorMetadata?.isEligibleForDeletion == false)
 }
 
 @Test func scanRootDefaultsToFirstDeletionRootWithoutCreatingOneForViewOnlySources() {

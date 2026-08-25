@@ -56,7 +56,8 @@ public struct SimulatorHierarchy: Sendable {
                     reasons.insert(.unknownMetadata)
                     continue
                 }
-                let metadataIsUnknown = !metadata.hasKnownClassification
+                let metadataIsUnknown =
+                    !metadata.hasKnownClassification || !metadata.hasExactIdentity
                 if metadataIsUnknown {
                     reasons.insert(.unknownMetadata)
                 }

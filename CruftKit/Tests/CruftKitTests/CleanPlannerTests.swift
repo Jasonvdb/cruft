@@ -187,6 +187,11 @@ private let viewOnlyPlanner = CleanPlanner(
                 deletionMode: .simulatorDevice,
                 simulatorMetadata: SimulatorDeviceMetadata(
                     udid: udid,
+                    name: "Device \(suffix)",
+                    deviceTypeIdentifier:
+                        "com.apple.CoreSimulator.SimDeviceType.Test-\(suffix)",
+                    runtimeIdentifier:
+                        "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
                     mainGroup: deletable ? .xcode : .unknown,
                     runtimeLabel: deletable ? "iOS 26.4" : "Unknown",
                     isBooted: false,
@@ -208,4 +213,28 @@ private let viewOnlyPlanner = CleanPlanner(
     #expect(plan.warnings == [
         "Xcode is running.", SimulatorDeviceDataSource.warning,
     ])
+}
+
+@Test func explicitSimulatorSubsetRejectsV3ItemWithoutExactIdentity() {
+    let simulator = SimulatorDeviceDataSource.id
+    let udid = "77777777-7777-4777-8777-777777777777"
+    let legacy = MeasuredItem(
+        item: CacheItem(
+            categoryID: simulator,
+            url: URL(filePath: "/tmp/fixture/CoreSimulator/Devices/\(udid)"),
+            label: "Legacy custom simulator",
+            deletionMode: .simulatorDevice,
+            simulatorMetadata: SimulatorDeviceMetadata(
+                udid: udid,
+                mainGroup: .other,
+                runtimeLabel: "iOS 26.5",
+                isBooted: false,
+                isDeletable: true)),
+        size: ItemSize(allocatedBytes: 4096, fileCount: 1))
+
+    let plan = planner.planSubset(simulator, measuredItems: [legacy])
+
+    #expect(plan.itemsByCategory.isEmpty)
+    #expect(plan.estimatedBytes == 0)
+    #expect(plan.warnings.isEmpty)
 }

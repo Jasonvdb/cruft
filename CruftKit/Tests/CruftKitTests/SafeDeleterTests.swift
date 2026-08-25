@@ -82,6 +82,24 @@ private struct SafeStubDirectProcessRunner: DirectProcessRunning {
             simulatorDeviceTypeNames: SafeSimulatorDeviceTypeNames())
     }
 
+    private func overwriteSimulatorState(
+        _ state: Any,
+        udid: String,
+        home: FixtureHome
+    ) throws {
+        let metadata: [String: Any] = [
+            "name": "iPhone 17 Pro",
+            "deviceType": safeSimulatorDeviceType,
+            "runtime": safeSimulatorRuntime,
+            "UDID": udid,
+            "state": state,
+        ]
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: metadata, format: .xml, options: 0)
+        try data.write(to: home.url(
+            "Library/Developer/CoreSimulator/Devices/\(udid)/device.plist"))
+    }
+
     // MARK: - Rule 1: outside home
 
     @Test func symlinkEscapesHome() async throws {
@@ -465,6 +483,28 @@ private struct SafeStubDirectProcessRunner: DirectProcessRunning {
             deletionMode: .simulatorDevice))?.ruleName == "simulatorTargetInvalid")
         #expect(home.exists("Library/Developer/CoreSimulator/Devices/\(booted)"))
         #expect(home.exists("Library/Developer/CoreSimulator/Devices/\(mismatch)"))
+    }
+
+    @Test func simulatorBooleanAndFloatingStatesAreRefusedAtDeletionSeam() async throws {
+        let home = try FixtureHome.makeTemporary()
+        defer { try? home.destroy() }
+        let booleanState = "BBBBBBB1-BBBB-4BBB-8BBB-BBBBBBBBBBB1"
+        let floatingState = "BBBBBBB2-BBBB-4BBB-8BBB-BBBBBBBBBBB2"
+        for udid in [booleanState, floatingState] {
+            _ = try home.plantSimulatorDeviceDecoy(uuid: udid)
+        }
+        try overwriteSimulatorState(true, udid: booleanState, home: home)
+        try overwriteSimulatorState(1.5, udid: floatingState, home: home)
+        let root = home.url("Library/Developer/CoreSimulator/Devices")
+        let deleter = try simulatorDeleter(home: home.root, mode: .dryRun)
+
+        for udid in [booleanState, floatingState] {
+            #expect(await refusal(deleter, request(
+                url: root.appending(path: udid), roots: [root],
+                deletionMode: .simulatorDevice))?.ruleName == "simulatorTargetInvalid")
+            #expect(home.exists("Library/Developer/CoreSimulator/Devices/\(udid)"))
+        }
+        #expect(await deleter.deletedURLs.isEmpty)
     }
 
     @Test func simulatorChangedIdentityFactsAndRetainedLabelAreRefused() async throws {

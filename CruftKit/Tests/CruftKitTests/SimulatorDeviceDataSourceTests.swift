@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import CruftKit
@@ -29,6 +30,24 @@ private struct StubDirectProcessRunner: DirectProcessRunning {
 private func testSource(names: [String: String]? = nil) -> SimulatorDeviceDataSource {
     SimulatorDeviceDataSource(
         deviceTypeNames: StubDeviceTypeNames(names: names ?? StubDeviceTypeNames().names))
+}
+
+private func overwriteSimulatorState(
+    _ state: Any,
+    udid: String,
+    fixture: FixtureHome
+) throws {
+    let metadata: [String: Any] = [
+        "name": "iPhone 17 Pro",
+        "deviceType": iphoneType,
+        "runtime": ios264,
+        "UDID": udid,
+        "state": state,
+    ]
+    let data = try PropertyListSerialization.data(
+        fromPropertyList: metadata, format: .xml, options: 0)
+    try data.write(to: fixture.url(
+        "\(simulatorDevicesPath)/\(udid)/device.plist"))
 }
 
 @Suite("SimulatorDeviceDataSource")
@@ -111,6 +130,33 @@ struct SimulatorDeviceDataSourceTests {
         #expect(items.first { $0.url.lastPathComponent == malformed }?.label == malformed)
         #expect(items.first { $0.url.lastPathComponent == mismatch }?
             .simulatorMetadata?.runtimeLabel == "iOS 26.4")
+    }
+
+    @Test func booleanAndFloatingStatesStayUnknownAndNeverReachDeletionSeam() async throws {
+        let fixture = try FixtureHome.makeTemporary()
+        defer { try? fixture.destroy() }
+        let booleanState = "55555555-5555-4555-8555-555555555555"
+        let floatingState = "66666666-6666-4666-8666-666666666666"
+        _ = try fixture.plantSimulatorDeviceDecoy(uuid: booleanState)
+        _ = try fixture.plantSimulatorDeviceDecoy(uuid: floatingState)
+        try overwriteSimulatorState(true, udid: booleanState, fixture: fixture)
+        try overwriteSimulatorState(1.5, udid: floatingState, fixture: fixture)
+        let source = testSource()
+        let context = ScanContext(home: fixture.root)
+
+        let items = try await source.discover(context: context)
+
+        #expect(items.count == 2)
+        #expect(items.allSatisfy { $0.simulatorMetadata?.mainGroup == .unknown })
+        #expect(items.allSatisfy { $0.simulatorMetadata?.isDeletable == false })
+        #expect(items.allSatisfy { !source.canClean(item: $0) })
+        let deleter = RecordingDeleter()
+        for item in items {
+            await #expect(throws: CacheSourceError.itemCleaningUnsupported(source.id, item.id)) {
+                try await source.clean(item: item, context: context, using: deleter)
+            }
+        }
+        #expect(await deleter.requests.isEmpty)
     }
 
     @Test func invalidDirectoriesFilesSymlinksAndNestedUUIDsAreIgnored() async throws {
@@ -216,6 +262,50 @@ struct SimulatorDeviceDataSourceTests {
             _ = try runner.run(executable: URL(filePath: "/bin/sleep"), arguments: ["2"])
         }
         #expect(Date().timeIntervalSince(started) < 1)
+    }
+
+    @Test func boundedProcessRunnerCapturesAndCapsSuccessfulOutput() throws {
+        let runner = BoundedDirectProcessRunner(timeout: 1, maximumOutputBytes: 4)
+
+        let result = try runner.run(
+            executable: URL(filePath: "/usr/bin/printf"), arguments: ["abcdef"])
+
+        #expect(result.status == 0)
+        #expect(String(decoding: result.standardOutput, as: UTF8.self) == "abcd")
+        #expect(result.standardError.isEmpty)
+        #expect(result.outputWasTruncated)
+    }
+
+    @Test func boundedProcessRunnerKillsPipeInheritingChildGroup() throws {
+        let fixture = try FixtureHome.makeTemporary()
+        defer { try? fixture.destroy() }
+        let childPIDFile = fixture.url("pipe-child.pid")
+        let runner = BoundedDirectProcessRunner(timeout: 0.05, maximumOutputBytes: 1024)
+        let started = Date()
+
+        // The shell is a test helper only. Production always launches the
+        // supplied executable directly. `sleep` inherits both output pipes.
+        #expect(throws: DirectProcessError.timedOut(
+            executable: "/bin/sh", seconds: 0.05)) {
+            _ = try runner.run(
+                executable: URL(filePath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "/bin/sleep 5 & child=$!; printf '%s' \"$child\" > \"$1\"; wait",
+                    "runner-test",
+                    childPIDFile.path(percentEncoded: false),
+                ])
+        }
+        #expect(Date().timeIntervalSince(started) < 1)
+
+        let childPIDText = try String(contentsOf: childPIDFile, encoding: .utf8)
+        let childPID = try #require(pid_t(childPIDText))
+        let deadline = Date().addingTimeInterval(1)
+        while Darwin.kill(childPID, 0) == 0, Date() < deadline {
+            Darwin.usleep(2_000)
+        }
+        #expect(Darwin.kill(childPID, 0) == -1)
+        #expect(errno == ESRCH)
     }
 
     @Test func deviceTypeListingTimeoutReturnsNoClassifications() {

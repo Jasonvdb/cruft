@@ -470,9 +470,9 @@ final class AppModel {
             // external `rm`, Xcode's own cleanup). SafeDeleter reports that
             // as `.doesNotExist`; drop JUST that item and retry the rest —
             // everything else was still consented to. Any other error
-            // aborts the whole run, as before. Bounded: each retry removes
-            // one vanished `.entireItem` (or re-lists a `.contentsOnly`
-            // root, which then skips its vanished child).
+            // aborts the whole run, as before. Each retry must remove an
+            // exact remaining plan item; a mismatched path or exhausted
+            // budget is an explicit error, never an apparent success.
             var retriesLeft = remaining.count + 3
             while !remaining.isEmpty, retriesLeft > 0 {
                 retriesLeft -= 1
@@ -490,21 +490,29 @@ final class AppModel {
                     remaining.removeAll { completedItemIDs.contains($0.id) }
 
                     if let path = Self.doesNotExistPath(from: partial.underlyingError) {
-                        let vanished = Self.normalizedPath(path)
-                        remaining.removeAll {
-                            Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
+                        do {
+                            remaining = try CleanRetryPolicy.removingMissingItem(
+                                at: path,
+                                from: remaining)
+                            categoryCompleted = remaining.isEmpty
+                        } catch {
+                            categoryFailure = error
+                            break
                         }
-                        categoryCompleted = remaining.isEmpty
                     } else {
                         categoryFailure = partial.underlyingError
                         break
                     }
                 } catch SafeDeleterError.doesNotExist(let path) {
-                    let vanished = Self.normalizedPath(path)
-                    remaining.removeAll {
-                        Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
+                    do {
+                        remaining = try CleanRetryPolicy.removingMissingItem(
+                            at: path,
+                            from: remaining)
+                        categoryCompleted = remaining.isEmpty
+                    } catch {
+                        categoryFailure = error
+                        break
                     }
-                    categoryCompleted = remaining.isEmpty
                 } catch {
                     // Stop on any real error: already-cleaned categories
                     // stay cleaned, the message reaches the result line,
@@ -513,6 +521,12 @@ final class AppModel {
                     categoryFailure = error
                     break
                 }
+            }
+            if categoryFailure == nil,
+                let terminalError = CleanRetryPolicy.terminalError(
+                    remainingItems: remaining)
+            {
+                categoryFailure = terminalError
             }
             let categoryDeleted = confirmedDeletedPaths.count
             freedBytes += categoryFreedBytes
