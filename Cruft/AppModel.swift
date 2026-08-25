@@ -162,6 +162,12 @@ final class AppModel {
         return Self.formattedBytes(menuState.displayedTotalBytes)
     }
 
+    /// Pure, presentation-ready simulator grouping. Persisted snapshots from
+    /// before simulator metadata existed remain visible under Other / Unknown.
+    var simulatorHierarchy: SimulatorHierarchy {
+        SimulatorHierarchy(snapshot: latestSnapshots[SimulatorDeviceDataSource.id])
+    }
+
     /// The EFFECTIVE projects root (the context's, after defaulting) — what
     /// the Settings window displays.
     var projectsRootDisplayPath: String {
@@ -335,8 +341,8 @@ final class AppModel {
 
     /// Builds a one-category plan and publishes the confirmation dialog
     /// (empty plan → transient "nothing to clean", no dialog). Per-category
-    /// clean is always available — including the destructive Archives,
-    /// whose plan carries the prominent destructive warning.
+    /// clean is available for sources that allow whole-category cleaning,
+    /// including Archives. Simulator deletion uses an explicit subgroup path.
     func requestClean(category: CategoryID) {
         guard pendingPlan == nil, !isCleaning else { return }
         let planner = CleanPlanner(sources: sources)
@@ -355,6 +361,39 @@ final class AppModel {
         let displayName = sources.first { $0.id == category }?.displayName ?? category.rawValue
         pendingPlan = makeConfirmation(
             title: "Clean \(displayName)", plan: plan, processWarnings: processWarnings)
+    }
+
+    /// Builds a plan for one exact simulator runtime subgroup. The whole group
+    /// must be eligible; a partial plan is refused instead of silently deleting
+    /// only the devices that passed the source check.
+    func requestDeleteSimulatorGroup(_ group: SimulatorHierarchy.RuntimeGroup) {
+        guard pendingPlan == nil, !isCleaning,
+            group.isDeletable, !group.measuredItems.isEmpty
+        else {
+            noteNothingToClean()
+            return
+        }
+        let category = SimulatorDeviceDataSource.id
+        let processWarnings = ProcessGuard().warnings(for: [category])
+        let plan = CleanPlanner(sources: sources).planSubset(
+            category,
+            measuredItems: group.measuredItems,
+            processWarnings: processWarnings)
+        guard plan.itemsByCategory[category]?.count == group.deviceCount else {
+            noteNothingToClean()
+            return
+        }
+        let groupName = "\(group.mainGroup.displayName) · \(group.runtimeLabel)"
+        let entry = PendingCleanConfirmation.Entry(
+            id: category,
+            displayName: groupName,
+            itemCount: group.deviceCount,
+            bytes: group.allocatedBytes)
+        pendingPlan = makeConfirmation(
+            title: "Delete \(groupName) Simulators",
+            plan: plan,
+            processWarnings: processWarnings,
+            entries: [entry])
     }
 
     /// Clean All membership comes from the planner's defaults plus the
@@ -473,9 +512,13 @@ final class AppModel {
     }
 
     private func makeConfirmation(
-        title: String, plan: CleanPlan, processWarnings: [String]
+        title: String,
+        plan: CleanPlan,
+        processWarnings: [String],
+        entries suppliedEntries: [PendingCleanConfirmation.Entry]? = nil
     ) -> PendingCleanConfirmation {
-        let entries = sources.compactMap { source -> PendingCleanConfirmation.Entry? in
+        let entries = suppliedEntries ?? sources.compactMap {
+            source -> PendingCleanConfirmation.Entry? in
             guard let items = plan.itemsByCategory[source.id] else { return nil }
             return PendingCleanConfirmation.Entry(
                 id: source.id,
@@ -483,10 +526,13 @@ final class AppModel {
                 itemCount: items.count,
                 bytes: latestSnapshots[source.id]?.totalBytes ?? 0)
         }
-        // Built from source flags, not by matching warning strings: any
-        // destructive category in the plan carries the planner's warning.
-        let hasDestructive = sources.contains {
-            $0.isDestructive && plan.itemsByCategory[$0.id] != nil
+        // Built from source metadata, not warning-text matching. Each
+        // destructive source supplies its own exact warning.
+        let destructiveWarnings = sources.compactMap { source -> String? in
+            guard source.isDestructive, plan.itemsByCategory[source.id] != nil else {
+                return nil
+            }
+            return source.destructiveWarning
         }
         return PendingCleanConfirmation(
             title: title,
@@ -494,7 +540,7 @@ final class AppModel {
             totalItemCount: entries.reduce(0) { $0 + $1.itemCount },
             estimatedBytes: plan.estimatedBytes,
             processWarnings: processWarnings,
-            destructiveWarnings: hasDestructive ? [CleanPlanner.destructiveWarning] : [],
+            destructiveWarnings: destructiveWarnings,
             plan: plan)
     }
 
