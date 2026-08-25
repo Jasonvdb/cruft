@@ -1,3 +1,4 @@
+import CruftKit
 import SwiftUI
 
 /// Transient line under the rows after a clean finishes: "Freed 5.1 GB —
@@ -31,9 +32,11 @@ struct CleanResultView: View {
     }
 
     private var summaryText: String {
-        let noun = result.deletedItems == 1 ? "item" : "items"
-        return "Freed \(AppModel.formattedBytes(result.freedBytes)) — "
-            + "\(result.deletedItems) \(noun)"
+        CleanResultSummary.text(
+            freedBytes: result.freedBytes,
+            deletedItems: result.deletedItems,
+            categoryIDs: result.perCategory.map(\.id),
+            formattedBytes: AppModel.formattedBytes(result.freedBytes))
     }
 
     private var breakdownText: String {
