@@ -99,6 +99,17 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
         self.isBooted = isBooted
         self.isDeletable = isDeletable
     }
+
+    public var hasKnownClassification: Bool {
+        mainGroup != .unknown && !runtimeLabel.isEmpty && runtimeLabel != "Unknown"
+    }
+
+    /// The shared subgroup, planner, source, and deletion-seam eligibility
+    /// rule. SafeDeleter still re-reads device.plist immediately before a
+    /// deletion because these retained scan facts can become stale.
+    public var isEligibleForDeletion: Bool {
+        hasKnownClassification && !isBooted && isDeletable
+    }
 }
 
 /// One cleanable thing on disk, discovered by a `CacheSource`. Identity is

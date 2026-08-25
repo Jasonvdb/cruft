@@ -368,7 +368,7 @@ final class AppModel {
     /// only the devices that passed the source check.
     func requestDeleteSimulatorGroup(_ group: SimulatorHierarchy.RuntimeGroup) {
         guard pendingPlan == nil, !isCleaning,
-            group.isDeletable, !group.measuredItems.isEmpty
+            group.isDeletable
         else {
             noteNothingToClean()
             return

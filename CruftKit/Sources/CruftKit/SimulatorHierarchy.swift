@@ -17,7 +17,7 @@ public struct SimulatorHierarchy: Sendable {
         }
     }
 
-    public enum DeletionBlockReason: String, Sendable, Hashable, Identifiable {
+    public enum DeletionBlockReason: Sendable, Hashable, Identifiable {
         case booted
         case unknownMetadata
         case notReady
@@ -56,18 +56,18 @@ public struct SimulatorHierarchy: Sendable {
                     reasons.insert(.unknownMetadata)
                     continue
                 }
-                let metadataIsUnknown = metadata.mainGroup == .unknown
-                    || metadata.runtimeLabel == "Unknown"
+                let metadataIsUnknown = !metadata.hasKnownClassification
                 if metadataIsUnknown {
                     reasons.insert(.unknownMetadata)
                 }
                 if metadata.isBooted {
                     reasons.insert(.booted)
-                } else if !metadata.isDeletable && !metadataIsUnknown {
+                } else if !metadata.isEligibleForDeletion && !metadataIsUnknown {
                     reasons.insert(.notReady)
                 }
             }
-            self.blockingReasons = reasons.sorted { $0.sortOrder < $1.sortOrder }
+            let reasonOrder: [DeletionBlockReason] = [.booted, .unknownMetadata, .notReady]
+            self.blockingReasons = reasonOrder.filter(reasons.contains)
         }
     }
 
@@ -134,10 +134,9 @@ public struct SimulatorHierarchy: Sendable {
             default: platformRank = 4
             }
             if parts.count == 2 {
-                let parsed = parts[1].split(separator: ".").compactMap { Int($0) }
-                self.version = parsed.count == parts[1].split(separator: ".").count
-                    ? parsed
-                    : nil
+                let versionParts = parts[1].split(separator: ".")
+                let parsed = versionParts.compactMap { Int($0) }
+                self.version = parsed.count == versionParts.count ? parsed : nil
             } else {
                 self.version = nil
             }
@@ -169,15 +168,5 @@ public struct SimulatorHierarchy: Sendable {
             break
         }
         return lhs < rhs
-    }
-}
-
-private extension SimulatorHierarchy.DeletionBlockReason {
-    var sortOrder: Int {
-        switch self {
-        case .booted: 0
-        case .unknownMetadata: 1
-        case .notReady: 2
-        }
     }
 }

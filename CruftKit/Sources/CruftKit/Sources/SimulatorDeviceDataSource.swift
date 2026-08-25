@@ -86,7 +86,7 @@ public struct SimulatorDeviceDataSource: CacheSource {
     public func canClean(item: CacheItem) -> Bool {
         item.categoryID == Self.id
             && item.deletionMode == .simulatorDevice
-            && item.simulatorMetadata?.isDeletable == true
+            && item.simulatorMetadata?.isEligibleForDeletion == true
     }
 
     /// Discovers only real, direct UUID-named directories. It does not follow
@@ -105,13 +105,14 @@ public struct SimulatorDeviceDataSource: CacheSource {
         else { return [] }
         guard isRealDirectory(root) else { return [] }
 
-        let standardNames = deviceTypeNames.standardNamesByIdentifier()
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
         let entries = try FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
         )
+        guard !entries.isEmpty else { return [] }
+        let standardNames = deviceTypeNames.standardNamesByIdentifier()
 
         return entries.compactMap { entry in
             let leafUDID = entry.lastPathComponent
@@ -160,7 +161,9 @@ public struct SimulatorDeviceDataSource: CacheSource {
         let standardName = deviceType.flatMap { standardNames[$0] }
 
         let group: SimulatorDeviceMetadata.MainGroup
-        if let name, standardName != nil, runtimeLabel != "Unknown", udidMatches, validState {
+        if let name, let standardName,
+            runtimeLabel != "Unknown", udidMatches, validState
+        {
             group = name == standardName ? .xcode : .other
         } else {
             group = .unknown

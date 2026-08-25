@@ -112,13 +112,19 @@ private func hierarchy(_ items: [MeasuredItem]) -> SimulatorHierarchy {
         simulatorItem(
             index: 2, name: "transitioning", mainGroup: .other,
             runtime: "watchOS 26.5", bytes: 200, isDeletable: false),
+        simulatorItem(
+            index: 3, name: "missing-runtime", mainGroup: .other,
+            runtime: "", bytes: 300),
     ])
     let other = try #require(result.sections.first { $0.mainGroup == .other })
     let ios = try #require(other.runtimeGroups.first { $0.runtimeLabel == "iOS 26.5" })
     let watch = try #require(other.runtimeGroups.first { $0.runtimeLabel == "watchOS 26.5" })
+    let unknown = try #require(other.runtimeGroups.first { $0.runtimeLabel == "Unknown" })
 
     #expect(ios.blockingReasons == [.unknownMetadata])
     #expect(watch.blockingReasons == [.notReady])
+    #expect(unknown.blockingReasons == [.unknownMetadata])
     #expect(!ios.isDeletable)
     #expect(!watch.isDeletable)
+    #expect(!unknown.isDeletable)
 }

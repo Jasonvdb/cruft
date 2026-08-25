@@ -247,10 +247,7 @@ public actor SafeDeleter: ItemDeleting {
             request.item.categoryID == SimulatorDeviceDataSource.id,
             let itemMetadata = request.item.simulatorMetadata,
             UUID(uuidString: itemMetadata.udid) == UUID(uuidString: udid),
-            itemMetadata.mainGroup != .unknown,
-            itemMetadata.runtimeLabel != "Unknown",
-            !itemMetadata.isBooted,
-            itemMetadata.isDeletable
+            itemMetadata.isEligibleForDeletion
         else {
             throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
         }
