@@ -18,6 +18,14 @@ private struct StubDeviceTypeNames: SimulatorDeviceTypeNameProviding {
     func standardNamesByIdentifier() -> [String: String] { names }
 }
 
+private struct StubDirectProcessRunner: DirectProcessRunning {
+    let operation: @Sendable (URL, [String]) throws -> DirectProcessResult
+
+    func run(executable: URL, arguments: [String]) throws -> DirectProcessResult {
+        try operation(executable, arguments)
+    }
+}
+
 private func testSource(names: [String: String]? = nil) -> SimulatorDeviceDataSource {
     SimulatorDeviceDataSource(
         deviceTypeNames: StubDeviceTypeNames(names: names ?? StubDeviceTypeNames().names))
@@ -60,6 +68,12 @@ struct SimulatorDeviceDataSourceTests {
 
         #expect(items.map(\.url.lastPathComponent) == [xcodeUDID, flowUDID])
         #expect(items.map(\.label) == ["iPhone 17 Pro", "SaySolid-feature-iPad"])
+        #expect(items.map(\.simulatorMetadata?.name)
+            == ["iPhone 17 Pro", "SaySolid-feature-iPad"])
+        #expect(items.map(\.simulatorMetadata?.deviceTypeIdentifier)
+            == [iphoneType, watchType])
+        #expect(items.map(\.simulatorMetadata?.runtimeIdentifier)
+            == [ios264, watchOS265])
         #expect(items.map(\.simulatorMetadata?.mainGroup) == [.xcode, .other])
         #expect(items.map(\.simulatorMetadata?.runtimeLabel) == ["iOS 26.4", "watchOS 26.5"])
         #expect(items[0].simulatorMetadata?.isBooted == false)
@@ -191,5 +205,28 @@ struct SimulatorDeviceDataSourceTests {
         #expect(!source.includedInCleanAllByDefault)
         #expect(source.isDestructive)
         #expect(source.destructiveWarning == SimulatorDeviceDataSource.warning)
+    }
+
+    @Test func boundedProcessRunnerTimesOutPromptly() {
+        let runner = BoundedDirectProcessRunner(timeout: 0.01, maximumOutputBytes: 1024)
+        let started = Date()
+
+        #expect(throws: DirectProcessError.timedOut(
+            executable: "/bin/sleep", seconds: 0.01)) {
+            _ = try runner.run(executable: URL(filePath: "/bin/sleep"), arguments: ["2"])
+        }
+        #expect(Date().timeIntervalSince(started) < 1)
+    }
+
+    @Test func deviceTypeListingTimeoutReturnsNoClassifications() {
+        let runner = StubDirectProcessRunner { executable, arguments in
+            #expect(executable == URL(filePath: "/usr/bin/xcrun"))
+            #expect(arguments == ["simctl", "list", "devicetypes", "--json"])
+            throw DirectProcessError.timedOut(
+                executable: executable.path(percentEncoded: false), seconds: 0.01)
+        }
+        let provider = SystemSimulatorDeviceTypeNameProvider(processRunner: runner)
+
+        #expect(provider.standardNamesByIdentifier().isEmpty)
     }
 }

@@ -3,15 +3,16 @@ import CruftKit
 import Foundation
 
 // =============================================================================
-// CLI SURFACE (contracts v2): subcommand names and flags remain stable. The
+// CLI SURFACE (contracts v3): subcommand names and flags remain stable. The
 // scan JSON category schema includes cleaning capability so callers can
-// distinguish cleanable and view-only storage.
+// distinguish CLI-cleanable, app-subgroup-only, and view-only storage.
 //
 // scan JSON schema:
 // {
 //   "categories": [
 //     { "id": "derived-data", "displayName": "Xcode DerivedData",
-//       "supportsCleaning": true, "bytes": 123, "itemCount": 2,
+//       "cleaningScope": "wholeCategory", "supportsCleaning": true,
+//       "bytes": 123, "itemCount": 2,
 //       "items": [ { "path": "/...", "label": "Foo", "bytes": 123, "fileCount": 4 } ] }
 //   ]
 // }
@@ -57,7 +58,7 @@ struct Scan: AsyncParsableCommand {
 
     @OptionGroup var context: ContextOptions
 
-    @Flag(name: .customLong("json"), help: "Emit machine-readable JSON (schema v2, see source header).")
+    @Flag(name: .customLong("json"), help: "Emit machine-readable JSON (schema v3, see source header).")
     var json = false
 
     func run() async throws {

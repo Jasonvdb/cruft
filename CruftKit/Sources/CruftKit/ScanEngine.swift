@@ -14,6 +14,31 @@ public struct CleanOutcome: Sendable, Codable {
     }
 }
 
+/// A multi-item clean stopped after one or more items completed. Callers must
+/// apply `outcome` before they surface `underlyingError`; otherwise the UI and
+/// persisted stats can report paths that no longer exist. `completedItemIDs`
+/// lets a caller retry only the unfinished items, including `.contentsOnly`
+/// roots whose returned deleted paths are their children.
+public struct PartialCleanFailure: Error, CustomStringConvertible {
+    public let outcome: CleanOutcome
+    public let completedItemIDs: [String]
+    public let underlyingError: any Error
+
+    public init(
+        outcome: CleanOutcome,
+        completedItemIDs: [String],
+        underlyingError: any Error
+    ) {
+        self.outcome = outcome
+        self.completedItemIDs = completedItemIDs
+        self.underlyingError = underlyingError
+    }
+
+    public var description: String {
+        String(describing: underlyingError)
+    }
+}
+
 /// Why `ScanEngine.clean` refused to start.
 public enum ScanEngineError: Error, Equatable {
     /// The category id is not in this engine's source list.
@@ -197,6 +222,9 @@ public actor ScanEngine {
             startQueuedIfPossible()
         }
         states[category] = .cleaning
+        var deletedPaths: [String] = []
+        var completedItemIDs: [String] = []
+        var freeBefore: Int64?
         do {
             let resolved: [CacheItem]
             if let items {
@@ -207,11 +235,11 @@ public actor ScanEngine {
                 resolved = try await source.discover(context: context)
             }
 
-            let freeBefore = Self.freeBytes(onVolumeOf: context.home)
-            var deletedPaths: [String] = []
+            freeBefore = Self.freeBytes(onVolumeOf: context.home)
             for item in resolved {
                 let deleted = try await source.clean(item: item, context: context, using: deleter)
                 deletedPaths.append(contentsOf: deleted.map { $0.path(percentEncoded: false) })
+                completedItemIDs.append(item.id)
             }
             let freeAfter = Self.freeBytes(onVolumeOf: context.home)
             // Compensating write BEFORE the post-clean rescan is enqueued:
@@ -224,17 +252,36 @@ public actor ScanEngine {
             // Either statfs sample failing means the delta is meaningless:
             // report 0 freed rather than a phantom number (a one-sided
             // sample would otherwise leak the volume's total free space).
-            let freedBytes: Int64
-            if let freeBefore, let freeAfter {
-                freedBytes = max(0, freeAfter - freeBefore)
-            } else {
-                freedBytes = 0
-            }
+            let freedBytes = Self.freedBytes(before: freeBefore, after: freeAfter)
             return CleanOutcome(deletedPaths: deletedPaths, freedBytes: freedBytes)
         } catch {
+            if !completedItemIDs.isEmpty {
+                let outcome = CleanOutcome(
+                    deletedPaths: deletedPaths,
+                    freedBytes: Self.freedBytes(
+                        before: freeBefore,
+                        after: Self.freeBytes(onVolumeOf: context.home)))
+                // Apply the same compensating write as a complete clean before
+                // the rescan is enqueued or the typed partial result escapes.
+                if let statsStore {
+                    await statsStore.noteCleaned(
+                        category: category,
+                        deletedPaths: deletedPaths)
+                }
+                finishClean(category)
+                throw PartialCleanFailure(
+                    outcome: outcome,
+                    completedItemIDs: completedItemIDs,
+                    underlyingError: error)
+            }
             finishClean(category)
             throw error
         }
+    }
+
+    private static func freedBytes(before: Int64?, after: Int64?) -> Int64 {
+        guard let before, let after else { return 0 }
+        return max(0, after - before)
     }
 
     /// Quit path: cancel every task, clear the queue, bump every generation

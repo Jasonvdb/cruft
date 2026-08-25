@@ -3,6 +3,28 @@ import Testing
 @testable import CruftKit
 import CruftKitTestSupport
 
+private let safeSimulatorDeviceType = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro"
+private let safeSimulatorRuntime = "com.apple.CoreSimulator.SimRuntime.iOS-26-4"
+private let safeAlternateDeviceType = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch"
+private let safeAlternateRuntime = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+
+private struct SafeSimulatorDeviceTypeNames: SimulatorDeviceTypeNameProviding {
+    func standardNamesByIdentifier() -> [String: String] {
+        [
+            safeSimulatorDeviceType: "iPhone 17 Pro",
+            safeAlternateDeviceType: "iPad Pro (13-inch)",
+        ]
+    }
+}
+
+private struct SafeStubDirectProcessRunner: DirectProcessRunning {
+    let operation: @Sendable (URL, [String]) throws -> DirectProcessResult
+
+    func run(executable: URL, arguments: [String]) throws -> DirectProcessResult {
+        try operation(executable, arguments)
+    }
+}
+
 /// End-to-end tests for the SafeDeleter choke point. Hermetic: every test
 /// plants its own FixtureHome under a system temp area and cleans up
 /// exclusively via FixtureHome.destroy().
@@ -13,6 +35,9 @@ import CruftKitTestSupport
         let simulatorMetadata: SimulatorDeviceMetadata? = deletionMode == .simulatorDevice
             ? SimulatorDeviceMetadata(
                 udid: url.lastPathComponent,
+                name: "iPhone 17 Pro",
+                deviceTypeIdentifier: safeSimulatorDeviceType,
+                runtimeIdentifier: safeSimulatorRuntime,
                 mainGroup: .xcode,
                 runtimeLabel: "iOS 26.4",
                 isBooted: false,
@@ -23,7 +48,7 @@ import CruftKitTestSupport
                 categoryID: deletionMode == .simulatorDevice
                     ? SimulatorDeviceDataSource.id : CategoryID("test"),
                 url: url,
-                label: url.lastPathComponent,
+                label: deletionMode == .simulatorDevice ? "iPhone 17 Pro" : url.lastPathComponent,
                 deletionMode: deletionMode,
                 simulatorMetadata: simulatorMetadata),
             allowedRoots: roots
@@ -42,6 +67,19 @@ import CruftKitTestSupport
             Issue.record("unexpected error type: \(error)")
             return nil
         }
+    }
+
+    private func simulatorDeleter(
+        home: URL,
+        mode: SafeDeleter.Mode,
+        commandRunner: any SimulatorDeviceCommandRunning =
+            SimctlSimulatorDeviceCommandRunner()
+    ) throws -> SafeDeleter {
+        try SafeDeleter(
+            home: home,
+            mode: mode,
+            simulatorCommandRunner: commandRunner,
+            simulatorDeviceTypeNames: SafeSimulatorDeviceTypeNames())
     }
 
     // MARK: - Rule 1: outside home
@@ -368,13 +406,13 @@ import CruftKitTestSupport
         _ = try home.plantSimulatorDeviceDecoy(
             uuid: udid,
             name: "iPhone 17 Pro",
-            deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
-            runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+            deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime,
             metadataUDID: udid,
             state: 1)
         let device = home.url("Library/Developer/CoreSimulator/Devices/\(udid)")
         let root = home.url("Library/Developer/CoreSimulator/Devices")
-        let deleter = try SafeDeleter(home: home.root, mode: .dryRun)
+        let deleter = try simulatorDeleter(home: home.root, mode: .dryRun)
 
         let deleted = try await deleter.delete(request(
             url: device, roots: [root], deletionMode: .simulatorDevice))
@@ -390,13 +428,13 @@ import CruftKitTestSupport
         let udid = "22222222-2222-4222-8222-222222222222"
         _ = try home.plantSimulatorDeviceDecoy(
             uuid: udid,
-            name: "Custom",
-            deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
-            runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+            name: "iPhone 17 Pro",
+            deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime,
             metadataUDID: udid,
             state: 1)
         let root = home.url("Library/Developer/CoreSimulator/Devices")
-        let deleter = try SafeDeleter(home: home.root, mode: .live)
+        let deleter = try simulatorDeleter(home: home.root, mode: .live)
 
         _ = try await deleter.delete(request(
             url: root.appending(path: udid), roots: [root], deletionMode: .simulatorDevice))
@@ -411,11 +449,13 @@ import CruftKitTestSupport
         let booted = "33333333-3333-4333-8333-333333333333"
         let mismatch = "44444444-4444-4444-8444-444444444444"
         _ = try home.plantSimulatorDeviceDecoy(
-            uuid: booted, name: "Booted", metadataUDID: booted, state: 3)
+            uuid: booted, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: booted, state: 3)
         _ = try home.plantSimulatorDeviceDecoy(
-            uuid: mismatch, name: "Mismatch", metadataUDID: booted, state: 1)
+            uuid: mismatch, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: booted, state: 1)
         let root = home.url("Library/Developer/CoreSimulator/Devices")
-        let deleter = try SafeDeleter(home: home.root, mode: .live)
+        let deleter = try simulatorDeleter(home: home.root, mode: .live)
 
         #expect(await refusal(deleter, request(
             url: root.appending(path: booted), roots: [root],
@@ -427,6 +467,48 @@ import CruftKitTestSupport
         #expect(home.exists("Library/Developer/CoreSimulator/Devices/\(mismatch)"))
     }
 
+    @Test func simulatorChangedIdentityFactsAndRetainedLabelAreRefused() async throws {
+        let home = try FixtureHome.makeTemporary()
+        defer { try? home.destroy() }
+        let renamed = "AAAAAAA1-AAAA-4AAA-8AAA-AAAAAAAAAAA1"
+        let changedType = "AAAAAAA2-AAAA-4AAA-8AAA-AAAAAAAAAAA2"
+        let changedRuntime = "AAAAAAA3-AAAA-4AAA-8AAA-AAAAAAAAAAA3"
+        let staleLabel = "AAAAAAA4-AAAA-4AAA-8AAA-AAAAAAAAAAA4"
+        _ = try home.plantSimulatorDeviceDecoy(
+            uuid: renamed, name: "Renamed", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: renamed, state: 1)
+        _ = try home.plantSimulatorDeviceDecoy(
+            uuid: changedType, name: "iPhone 17 Pro", deviceType: safeAlternateDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: changedType, state: 1)
+        _ = try home.plantSimulatorDeviceDecoy(
+            uuid: changedRuntime, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeAlternateRuntime, metadataUDID: changedRuntime, state: 1)
+        _ = try home.plantSimulatorDeviceDecoy(
+            uuid: staleLabel, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: staleLabel, state: 1)
+        let root = home.url("Library/Developer/CoreSimulator/Devices")
+        let deleter = try simulatorDeleter(home: home.root, mode: .dryRun)
+
+        for udid in [renamed, changedType, changedRuntime] {
+            #expect(await refusal(deleter, request(
+                url: root.appending(path: udid), roots: [root],
+                deletionMode: .simulatorDevice))?.ruleName == "simulatorTargetInvalid")
+        }
+        let retained = request(
+            url: root.appending(path: staleLabel), roots: [root],
+            deletionMode: .simulatorDevice)
+        let wrongLabel = DeletionRequest(
+            item: CacheItem(
+                categoryID: retained.item.categoryID,
+                url: retained.item.url,
+                label: "Stale label",
+                deletionMode: retained.item.deletionMode,
+                simulatorMetadata: retained.item.simulatorMetadata),
+            allowedRoots: retained.allowedRoots)
+        #expect(await refusal(deleter, wrongLabel)?.ruleName == "simulatorTargetInvalid")
+        #expect(await deleter.deletedURLs.isEmpty)
+    }
+
     @Test func simulatorRootNestedSymlinkAndOrdinaryModesAreRefused() async throws {
         let home = try FixtureHome.makeTemporary()
         defer { try? home.destroy() }
@@ -434,7 +516,8 @@ import CruftKitTestSupport
         let nested = "66666666-6666-4666-8666-666666666666"
         let linked = "77777777-7777-4777-8777-777777777777"
         _ = try home.plantSimulatorDeviceDecoy(
-            uuid: direct, name: "Direct", metadataUDID: direct, state: 1)
+            uuid: direct, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: direct, state: 1)
         try home.plantFile(
             "Library/Developer/CoreSimulator/Devices/\(direct)/nested/\(nested)/payload.bin")
         let linkedTarget = try home.plantDir("Library/Caches/simulator-link-target")
@@ -442,7 +525,7 @@ import CruftKitTestSupport
             at: "Library/Developer/CoreSimulator/Devices/\(linked)",
             to: linkedTarget.path(percentEncoded: false))
         let root = home.url("Library/Developer/CoreSimulator/Devices")
-        let deleter = try SafeDeleter(home: home.root, mode: .live)
+        let deleter = try simulatorDeleter(home: home.root, mode: .live)
 
         #expect(await refusal(deleter, request(
             url: root, roots: [root], deletionMode: .simulatorDevice))?.ruleName
@@ -469,13 +552,14 @@ import CruftKitTestSupport
         }
         let udid = "88888888-8888-4888-8888-888888888888"
         _ = try outside.plantSimulatorDeviceDecoy(
-            uuid: udid, name: "Outside", metadataUDID: udid, state: 1)
+            uuid: udid, name: "iPhone 17 Pro", deviceType: safeSimulatorDeviceType,
+            runtime: safeSimulatorRuntime, metadataUDID: udid, state: 1)
         try home.plantDir("Library/Developer")
         try home.plantSymlink(
             at: "Library/Developer/CoreSimulator",
             to: outside.url("Library/Developer/CoreSimulator").path(percentEncoded: false))
         let root = home.url("Library/Developer/CoreSimulator/Devices")
-        let deleter = try SafeDeleter(home: home.root, mode: .live)
+        let deleter = try simulatorDeleter(home: home.root, mode: .live)
 
         #expect(await refusal(deleter, request(
             url: root.appending(path: udid), roots: [root],
@@ -491,6 +575,23 @@ import CruftKitTestSupport
 
         #expect(throws: SimctlSimulatorDeviceCommandRunner.CommandError.failed(
             72, "simulated failure")) {
+            try runner.deleteSimulator(udid: "99999999-9999-4999-8999-999999999999")
+        }
+    }
+
+    @Test func simctlDeleteTimeoutIsTypedAndUsesDirectArguments() {
+        let processRunner = SafeStubDirectProcessRunner { executable, arguments in
+            #expect(executable == URL(filePath: "/usr/bin/xcrun"))
+            #expect(arguments == [
+                "simctl", "delete", "99999999-9999-4999-8999-999999999999",
+            ])
+            throw DirectProcessError.timedOut(
+                executable: executable.path(percentEncoded: false), seconds: 0.01)
+        }
+        let runner = SimctlSimulatorDeviceCommandRunner(processRunner: processRunner)
+
+        #expect(throws: DirectProcessError.timedOut(
+            executable: "/usr/bin/xcrun", seconds: 0.01)) {
             try runner.deleteSimulator(udid: "99999999-9999-4999-8999-999999999999")
         }
     }

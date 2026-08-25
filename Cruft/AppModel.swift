@@ -449,9 +449,23 @@ final class AppModel {
         var perCategory: [CleanResult.CategoryResult] = []
         var errorMessage: String?
         // Registry order, matching the menu rows.
-        categories: for source in sources {
+        for source in sources {
             guard var remaining = plan.itemsByCategory[source.id] else { continue }
-            var categoryDeleted = 0
+            var categoryFreedBytes: Int64 = 0
+            var confirmedDeletedPaths: [String] = []
+            var confirmedDeletedPathSet: Set<String> = []
+            var categoryCompleted = false
+            var categoryFailure: (any Error)?
+
+            func record(_ outcome: CleanOutcome) {
+                let newPaths = outcome.deletedPaths.filter { path in
+                    confirmedDeletedPathSet.insert(Self.normalizedPath(path)).inserted
+                }
+                guard !newPaths.isEmpty else { return }
+                confirmedDeletedPaths.append(contentsOf: newPaths)
+                categoryFreedBytes += outcome.freedBytes
+            }
+
             // An item can vanish between the dialog opening and now (an
             // external `rm`, Xcode's own cleanup). SafeDeleter reports that
             // as `.doesNotExist`; drop JUST that item and retry the rest —
@@ -464,33 +478,74 @@ final class AppModel {
                 retriesLeft -= 1
                 do {
                     let outcome = try await engine.clean(category: source.id, items: remaining)
-                    freedBytes += outcome.freedBytes
-                    categoryDeleted += outcome.deletedPaths.count
+                    record(outcome)
                     remaining = []
+                    categoryCompleted = true
+                } catch let partial as PartialCleanFailure {
+                    // ScanEngine has already persisted these exact successes.
+                    // Count them before routing the underlying failure, and
+                    // never submit their source items again on a retry.
+                    record(partial.outcome)
+                    let completedItemIDs = Set(partial.completedItemIDs)
+                    remaining.removeAll { completedItemIDs.contains($0.id) }
+
+                    if let path = Self.doesNotExistPath(from: partial.underlyingError) {
+                        let vanished = Self.normalizedPath(path)
+                        remaining.removeAll {
+                            Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
+                        }
+                        categoryCompleted = remaining.isEmpty
+                    } else {
+                        categoryFailure = partial.underlyingError
+                        break
+                    }
                 } catch SafeDeleterError.doesNotExist(let path) {
                     let vanished = Self.normalizedPath(path)
                     remaining.removeAll {
                         Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
                     }
+                    categoryCompleted = remaining.isEmpty
                 } catch {
                     // Stop on any real error: already-cleaned categories
                     // stay cleaned, the message reaches the result line,
                     // never crash. (The engine's error path still enqueues
                     // a `.postClean` rescan, so the display self-corrects.)
-                    errorMessage = String(describing: error)
-                    break categories
+                    categoryFailure = error
+                    break
                 }
             }
+            let categoryDeleted = confirmedDeletedPaths.count
+            freedBytes += categoryFreedBytes
             deletedItems += categoryDeleted
             perCategory.append(CleanResult.CategoryResult(
                 id: source.id,
                 displayName: source.displayName,
                 deletedItems: categoryDeleted))
-            // The retained number is no longer truthful: drop it and let
-            // the engine's automatic `.postClean` rescan repaint from
-            // zero (MenuState.noteCleaned owns that rule).
-            latestSnapshots[source.id] = nil
-            menuState.noteCleaned(source.id)
+
+            if source.id == SimulatorDeviceDataSource.id {
+                // Simulator plans are always exact subsets. Keep every
+                // untouched measured device visible while the automatic
+                // post-clean scan validates the retained remainder.
+                if !confirmedDeletedPaths.isEmpty,
+                    let snapshot = latestSnapshots[source.id]
+                {
+                    let remainder = SimulatorHierarchy.remainingSnapshot(
+                        from: snapshot,
+                        deletingPaths: confirmedDeletedPaths)
+                    latestSnapshots[source.id] = remainder
+                    menuState.noteCleaned(source.id, retaining: remainder)
+                }
+            } else if categoryCompleted || !confirmedDeletedPaths.isEmpty {
+                // Whole-category sources, including `.contentsOnly` roots,
+                // keep their existing repaint-from-zero behavior.
+                latestSnapshots[source.id] = nil
+                menuState.noteCleaned(source.id)
+            }
+
+            if let categoryFailure {
+                errorMessage = String(describing: categoryFailure)
+                break
+            }
         }
         lastCleanResult = CleanResult(
             freedBytes: freedBytes,
@@ -507,6 +562,15 @@ final class AppModel {
         var path = path
         while path.count > 1 && path.hasSuffix("/") {
             path.removeLast()
+        }
+        return path
+    }
+
+    private static func doesNotExistPath(from error: any Error) -> String? {
+        guard let deleterError = error as? SafeDeleterError,
+            case .doesNotExist(let path) = deleterError
+        else {
+            return nil
         }
         return path
     }

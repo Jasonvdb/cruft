@@ -144,6 +144,21 @@ public struct MenuState: Sendable {
         }
     }
 
+    /// An exact subset clean left measured items in this category. Paint that
+    /// known remainder immediately and retain it while the post-clean scan
+    /// validates the category. The current activity stays unchanged so an
+    /// in-flight validation scan remains visible.
+    public mutating func noteCleaned(
+        _ id: CategoryID,
+        retaining snapshot: CategorySnapshot
+    ) {
+        mutate(id) { row in
+            row.bytes = snapshot.totalBytes
+            row.itemCount = snapshot.items.count
+            row.hasFinalValue = true
+        }
+    }
+
     private mutating func mutate(_ id: CategoryID, _ body: (inout Row) -> Void) {
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
         body(&rows[index])

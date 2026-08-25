@@ -128,3 +128,37 @@ private func hierarchy(_ items: [MeasuredItem]) -> SimulatorHierarchy {
     #expect(!watch.isDeletable)
     #expect(!unknown.isDeletable)
 }
+
+@Test func simulatorSnapshotRemainderPreservesUntouchedGroupsAndBytes() throws {
+    let deleted = simulatorItem(
+        index: 1, name: "old-a", mainGroup: .xcode,
+        runtime: "iOS 26.4", bytes: 100)
+    let oldRemaining = simulatorItem(
+        index: 2, name: "old-b", mainGroup: .xcode,
+        runtime: "iOS 26.4", bytes: 200)
+    let customRemaining = simulatorItem(
+        index: 3, name: "Flow-new", mainGroup: .other,
+        runtime: "iOS 26.5", bytes: 500)
+    let original = CategorySnapshot(
+        categoryID: SimulatorDeviceDataSource.id,
+        items: [deleted, oldRemaining, customRemaining],
+        updatedAt: Date())
+
+    let remainder = SimulatorHierarchy.remainingSnapshot(
+        from: original,
+        deletingPaths: [deleted.item.url.path(percentEncoded: false) + "/"])
+    let result = SimulatorHierarchy(snapshot: remainder)
+
+    #expect(remainder.items.map(\.item.id) == [oldRemaining.item.id, customRemaining.item.id])
+    #expect(remainder.totalBytes == 700)
+    let xcode = try #require(result.sections.first { $0.mainGroup == .xcode })
+    let oldRuntime = try #require(
+        xcode.runtimeGroups.first { $0.runtimeLabel == "iOS 26.4" })
+    #expect(oldRuntime.deviceCount == 1)
+    #expect(oldRuntime.allocatedBytes == 200)
+    let other = try #require(result.sections.first { $0.mainGroup == .other })
+    let newRuntime = try #require(
+        other.runtimeGroups.first { $0.runtimeLabel == "iOS 26.5" })
+    #expect(newRuntime.deviceCount == 1)
+    #expect(newRuntime.allocatedBytes == 500)
+}

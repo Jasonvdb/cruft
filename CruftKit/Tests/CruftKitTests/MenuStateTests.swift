@@ -230,3 +230,27 @@ private func row(_ state: MenuState, _ id: String) -> MenuState.Row? {
     state.apply(.partial(CategoryID("a"), makeSnapshot("a", bytes: 4096, updatedAt: nil)))
     #expect(row(state, "a")?.bytes == 4096, "post-clean partials drive the number again")
 }
+
+@Test func subsetCleanRetainsKnownRemainderUntilPostCleanFinishes() {
+    var state = MenuState(
+        sources: [SourceA()],
+        persisted: [makeSnapshot("a", bytes: 100_000, itemCount: 2)]
+    )
+    let remainder = makeSnapshot("a", bytes: 40_000, itemCount: 1)
+
+    state.apply(.categoryStarted(CategoryID("a")))
+    state.noteCleaned(CategoryID("a"), retaining: remainder)
+    #expect(row(state, "a")?.bytes == 40_000)
+    #expect(row(state, "a")?.itemCount == 1)
+    #expect(row(state, "a")?.activity == .discovering)
+
+    state.apply(.partial(
+        CategoryID("a"),
+        makeSnapshot("a", bytes: 4_096, updatedAt: nil)))
+    #expect(row(state, "a")?.bytes == 40_000, "a validation partial must not hide the remainder")
+
+    state.apply(.finished(
+        CategoryID("a"),
+        makeSnapshot("a", bytes: 36_000, itemCount: 1)))
+    #expect(row(state, "a")?.bytes == 36_000)
+}

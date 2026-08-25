@@ -8,25 +8,20 @@ protocol SimulatorDeviceTypeNameProviding: Sendable {
 }
 
 struct SystemSimulatorDeviceTypeNameProvider: SimulatorDeviceTypeNameProviding {
-    private static let maximumOutputBytes = 4 * 1024 * 1024
+    private let processRunner: any DirectProcessRunning
+
+    init(processRunner: any DirectProcessRunning = BoundedDirectProcessRunner()) {
+        self.processRunner = processRunner
+    }
 
     func standardNamesByIdentifier() -> [String: String] {
-        let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "list", "devicetypes", "--json"]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return [:]
-        }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-            data.count <= Self.maximumOutputBytes,
-            let document = try? JSONDecoder().decode(DeviceTypesDocument.self, from: data)
+        guard let result = try? processRunner.run(
+            executable: URL(filePath: "/usr/bin/xcrun"),
+            arguments: ["simctl", "list", "devicetypes", "--json"]),
+            result.status == 0,
+            !result.outputWasTruncated,
+            let document = try? JSONDecoder().decode(
+                DeviceTypesDocument.self, from: result.standardOutput)
         else { return [:] }
         return Dictionary(
             document.devicetypes.map { ($0.identifier, $0.name) },
@@ -40,6 +35,112 @@ struct SystemSimulatorDeviceTypeNameProvider: SimulatorDeviceTypeNameProviding {
     private struct DeviceType: Decodable {
         let identifier: String
         let name: String
+    }
+}
+
+/// One strict parser and classifier for CoreSimulator `device.plist`. Scan
+/// discovery and delete-time validation both use this implementation.
+struct SimulatorDeviceMetadataReader: Sendable {
+    private static let maximumMetadataBytes = 64 * 1024
+    private static let maximumDeviceNameLength = 80
+    private static let maximumIdentifierLength = 200
+    private static let shutdownState = 1
+    private static let bootedState = 3
+
+    func metadata(
+        in directory: URL,
+        leafUDID: String,
+        standardNames: [String: String]
+    ) -> SimulatorDeviceMetadata {
+        guard let dictionary = safeMetadataDictionary(in: directory) else {
+            return unknownMetadata(udid: leafUDID)
+        }
+
+        let name = safeString(
+            dictionary["name"], maximumLength: Self.maximumDeviceNameLength,
+            disallowSlash: true)
+        let deviceType = safeString(
+            dictionary["deviceType"], maximumLength: Self.maximumIdentifierLength)
+        let runtime = safeString(
+            dictionary["runtime"], maximumLength: Self.maximumIdentifierLength)
+        let metadataUDID = safeString(dictionary["UDID"], maximumLength: 36)
+        let state = (dictionary["state"] as? NSNumber)?.intValue
+        let runtimeLabel = runtime.flatMap(Self.runtimeLabel) ?? "Unknown"
+        let udidMatches = metadataUDID.flatMap(UUID.init(uuidString:))
+            == UUID(uuidString: leafUDID)
+        let validState = state.map { (0...4).contains($0) } == true
+        let standardName = deviceType.flatMap { standardNames[$0] }
+
+        let group: SimulatorDeviceMetadata.MainGroup
+        if let name, let standardName,
+            runtimeLabel != "Unknown", udidMatches, validState
+        {
+            group = name == standardName ? .xcode : .other
+        } else {
+            group = .unknown
+        }
+        let isBooted = state == Self.bootedState
+        return SimulatorDeviceMetadata(
+            udid: leafUDID,
+            name: name,
+            deviceTypeIdentifier: deviceType,
+            runtimeIdentifier: runtime,
+            mainGroup: group,
+            runtimeLabel: runtimeLabel,
+            isBooted: isBooted,
+            isDeletable: group != .unknown && state == Self.shutdownState)
+    }
+
+    private func unknownMetadata(udid: String) -> SimulatorDeviceMetadata {
+        SimulatorDeviceMetadata(
+            udid: udid,
+            mainGroup: .unknown,
+            runtimeLabel: "Unknown",
+            isBooted: false,
+            isDeletable: false)
+    }
+
+    private func safeMetadataDictionary(in directory: URL) -> [String: Any]? {
+        let metadata = directory.appending(path: "device.plist")
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        guard let values = try? metadata.resourceValues(forKeys: keys),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let fileSize = values.fileSize,
+            fileSize <= Self.maximumMetadataBytes,
+            let data = try? Data(contentsOf: metadata),
+            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+            let dictionary = plist as? [String: Any]
+        else { return nil }
+        return dictionary
+    }
+
+    private func safeString(
+        _ value: Any?, maximumLength: Int, disallowSlash: Bool = false
+    ) -> String? {
+        guard let string = value as? String,
+            !string.isEmpty,
+            string.count <= maximumLength,
+            string == string.trimmingCharacters(in: .whitespacesAndNewlines),
+            (!disallowSlash || !string.contains("/")),
+            string.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+        else { return nil }
+        return string
+    }
+
+    private static func runtimeLabel(_ identifier: String) -> String? {
+        let prefix = "com.apple.CoreSimulator.SimRuntime."
+        guard identifier.hasPrefix(prefix) else { return nil }
+        let suffix = String(identifier.dropFirst(prefix.count))
+        let components = suffix.split(separator: "-", omittingEmptySubsequences: false)
+        guard components.count >= 2 else { return nil }
+        let platform = String(components[0])
+        let supportedPlatforms = ["iOS", "watchOS", "tvOS", "visionOS"]
+        guard supportedPlatforms.contains(platform) else { return nil }
+        let versionComponents = components.dropFirst().map(String.init)
+        guard versionComponents.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) })
+        else { return nil }
+        return platform + " " + versionComponents.joined(separator: ".")
     }
 }
 
@@ -59,12 +160,6 @@ public struct SimulatorDeviceDataSource: CacheSource {
     public let destructiveWarning: String? = Self.warning
 
     private static let devicesRelativePath = "Library/Developer/CoreSimulator/Devices"
-    private static let maximumMetadataBytes = 64 * 1024
-    private static let maximumDeviceNameLength = 80
-    private static let maximumIdentifierLength = 200
-    private static let shutdownState = 1
-    private static let bootedState = 3
-
     private let deviceTypeNames: any SimulatorDeviceTypeNameProviding
 
     public init() {
@@ -123,114 +218,17 @@ public struct SimulatorDeviceDataSource: CacheSource {
             else { return nil }
 
             let directory = root.appending(path: leafUDID)
-            let facts = deviceFacts(
+            let metadata = SimulatorDeviceMetadataReader().metadata(
                 in: directory, leafUDID: leafUDID, standardNames: standardNames)
             return CacheItem(
                 categoryID: Self.id,
                 url: directory,
-                label: facts.name ?? leafUDID,
+                label: metadata.name ?? leafUDID,
                 deletionMode: .simulatorDevice,
-                simulatorMetadata: facts.metadata
+                simulatorMetadata: metadata
             )
         }
         .sorted { $0.url.path(percentEncoded: false) < $1.url.path(percentEncoded: false) }
-    }
-
-    private func deviceFacts(
-        in directory: URL,
-        leafUDID: String,
-        standardNames: [String: String]
-    ) -> (name: String?, metadata: SimulatorDeviceMetadata) {
-        guard let dictionary = safeMetadataDictionary(in: directory) else {
-            return (nil, unknownMetadata(udid: leafUDID))
-        }
-
-        let name = safeString(
-            dictionary["name"], maximumLength: Self.maximumDeviceNameLength, disallowSlash: true)
-        let deviceType = safeString(
-            dictionary["deviceType"], maximumLength: Self.maximumIdentifierLength)
-        let runtime = safeString(
-            dictionary["runtime"], maximumLength: Self.maximumIdentifierLength)
-        let metadataUDID = safeString(
-            dictionary["UDID"], maximumLength: 36)
-        let state = (dictionary["state"] as? NSNumber)?.intValue
-        let runtimeLabel = runtime.flatMap(Self.runtimeLabel) ?? "Unknown"
-        let udidMatches = metadataUDID.flatMap(UUID.init(uuidString:))
-            == UUID(uuidString: leafUDID)
-        let validState = state.map { (0...4).contains($0) } == true
-        let standardName = deviceType.flatMap { standardNames[$0] }
-
-        let group: SimulatorDeviceMetadata.MainGroup
-        if let name, let standardName,
-            runtimeLabel != "Unknown", udidMatches, validState
-        {
-            group = name == standardName ? .xcode : .other
-        } else {
-            group = .unknown
-        }
-        let isBooted = state == Self.bootedState
-        let isDeletable = group != .unknown && state == Self.shutdownState
-        return (
-            name,
-            SimulatorDeviceMetadata(
-                udid: leafUDID,
-                mainGroup: group,
-                runtimeLabel: runtimeLabel,
-                isBooted: isBooted,
-                isDeletable: isDeletable)
-        )
-    }
-
-    private func unknownMetadata(udid: String) -> SimulatorDeviceMetadata {
-        SimulatorDeviceMetadata(
-            udid: udid,
-            mainGroup: .unknown,
-            runtimeLabel: "Unknown",
-            isBooted: false,
-            isDeletable: false)
-    }
-
-    private func safeMetadataDictionary(in directory: URL) -> [String: Any]? {
-        let metadata = directory.appending(path: "device.plist")
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
-        guard let values = try? metadata.resourceValues(forKeys: keys),
-            values.isRegularFile == true,
-            values.isSymbolicLink != true,
-            let fileSize = values.fileSize,
-            fileSize <= Self.maximumMetadataBytes,
-            let data = try? Data(contentsOf: metadata),
-            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
-            let dictionary = plist as? [String: Any]
-        else { return nil }
-        return dictionary
-    }
-
-    private func safeString(
-        _ value: Any?, maximumLength: Int, disallowSlash: Bool = false
-    ) -> String? {
-        guard let string = value as? String,
-            !string.isEmpty,
-            string.count <= maximumLength,
-            string == string.trimmingCharacters(in: .whitespacesAndNewlines),
-            (!disallowSlash || !string.contains("/")),
-            string.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
-        else { return nil }
-        return string
-    }
-
-    private static func runtimeLabel(_ identifier: String) -> String? {
-        let prefix = "com.apple.CoreSimulator.SimRuntime."
-        guard identifier.hasPrefix(prefix) else { return nil }
-        let suffix = String(identifier.dropFirst(prefix.count))
-        let components = suffix.split(separator: "-", omittingEmptySubsequences: false)
-        guard components.count >= 2 else { return nil }
-        let platform = String(components[0])
-        let supportedPlatforms = ["iOS", "watchOS", "tvOS", "visionOS"]
-        guard supportedPlatforms.contains(platform) else { return nil }
-        let versionComponents = components.dropFirst().map(String.init)
-        guard versionComponents.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) })
-        else { return nil }
-        return platform + " " + versionComponents.joined(separator: ".")
     }
 
     private func normalizedPath(_ url: URL) -> String {

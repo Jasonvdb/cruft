@@ -1,7 +1,7 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v3) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v4) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
 // =============================================================================
@@ -81,6 +81,11 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
     }
 
     public let udid: String
+    /// Optional only so snapshots written before contracts v4 still decode.
+    /// New simulator discoveries always retain all three exact values.
+    public let name: String?
+    public let deviceTypeIdentifier: String?
+    public let runtimeIdentifier: String?
     public let mainGroup: MainGroup
     public let runtimeLabel: String
     public let isBooted: Bool
@@ -88,12 +93,18 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
 
     public init(
         udid: String,
+        name: String? = nil,
+        deviceTypeIdentifier: String? = nil,
+        runtimeIdentifier: String? = nil,
         mainGroup: MainGroup,
         runtimeLabel: String,
         isBooted: Bool,
         isDeletable: Bool
     ) {
         self.udid = udid
+        self.name = name
+        self.deviceTypeIdentifier = deviceTypeIdentifier
+        self.runtimeIdentifier = runtimeIdentifier
         self.mainGroup = mainGroup
         self.runtimeLabel = runtimeLabel
         self.isBooted = isBooted

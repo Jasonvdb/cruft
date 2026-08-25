@@ -113,6 +113,23 @@ public struct SimulatorHierarchy: Sendable {
         }
     }
 
+    /// Returns the measured simulator snapshot that remains after exact paths
+    /// were confirmed deleted. Untouched measurements and metadata stay in the
+    /// snapshot so their runtime groups remain visible during the post-clean
+    /// validation scan.
+    public static func remainingSnapshot(
+        from snapshot: CategorySnapshot,
+        deletingPaths: [String]
+    ) -> CategorySnapshot {
+        let deleted = Set(deletingPaths.map(normalizedPath))
+        var remaining = snapshot
+        remaining.items.removeAll { measured in
+            deleted.contains(normalizedPath(
+                measured.item.url.path(percentEncoded: false)))
+        }
+        return remaining
+    }
+
     private struct GroupKey: Hashable {
         let mainGroup: MainGroup
         let runtimeLabel: String
@@ -168,5 +185,13 @@ public struct SimulatorHierarchy: Sendable {
             break
         }
         return lhs < rhs
+    }
+
+    private static func normalizedPath(_ rawPath: String) -> String {
+        var path = rawPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
     }
 }

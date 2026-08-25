@@ -47,7 +47,21 @@ public struct SimctlSimulatorDeviceCommandRunner: SimulatorDeviceCommandRunning 
     private let operation: @Sendable (String) throws -> Result
 
     public init() {
-        self.operation = Self.runCommand
+        self.init(processRunner: BoundedDirectProcessRunner())
+    }
+
+    init(processRunner: any DirectProcessRunning) {
+        self.operation = { udid in
+            let result = try processRunner.run(
+                executable: URL(filePath: "/usr/bin/xcrun"),
+                arguments: ["simctl", "delete", udid])
+            let rawError = String(
+                decoding: result.standardError.prefix(1024), as: UTF8.self)
+            let errorText = rawError
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Result(status: result.status, errorText: errorText)
+        }
     }
 
     init(operation: @escaping @Sendable (String) throws -> Result) {
@@ -61,22 +75,6 @@ public struct SimctlSimulatorDeviceCommandRunner: SimulatorDeviceCommandRunning 
         }
     }
 
-    private static func runCommand(udid: String) throws -> Result {
-        let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "delete", udid]
-        process.standardOutput = FileHandle.nullDevice
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let rawError = String(decoding: errorData.prefix(1024), as: UTF8.self)
-        let errorText = rawError
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return Result(status: process.terminationStatus, errorText: errorText)
-    }
 }
 
 /// THE deletion choke point. The only file in the repository where
@@ -114,6 +112,7 @@ public actor SafeDeleter: ItemDeleting {
     private let homePath: String
     private let isRealHome: Bool
     private let simulatorCommandRunner: any SimulatorDeviceCommandRunning
+    private let simulatorDeviceTypeNames: any SimulatorDeviceTypeNameProviding
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
@@ -123,6 +122,19 @@ public actor SafeDeleter: ItemDeleting {
         mode: Mode,
         simulatorCommandRunner: any SimulatorDeviceCommandRunning =
             SimctlSimulatorDeviceCommandRunner()
+    ) throws {
+        try self.init(
+            home: home,
+            mode: mode,
+            simulatorCommandRunner: simulatorCommandRunner,
+            simulatorDeviceTypeNames: SystemSimulatorDeviceTypeNameProvider())
+    }
+
+    init(
+        home: URL,
+        mode: Mode,
+        simulatorCommandRunner: any SimulatorDeviceCommandRunning,
+        simulatorDeviceTypeNames: any SimulatorDeviceTypeNameProviding
     ) throws {
         self.mode = mode
         let candidate = Self.normalizedPath(home.cruftCanonical)
@@ -136,6 +148,7 @@ public actor SafeDeleter: ItemDeleting {
         self.homePath = candidate
         self.isRealHome = candidate == realHome
         self.simulatorCommandRunner = simulatorCommandRunner
+        self.simulatorDeviceTypeNames = simulatorDeviceTypeNames
     }
 
     @discardableResult
@@ -247,6 +260,10 @@ public actor SafeDeleter: ItemDeleting {
             request.item.categoryID == SimulatorDeviceDataSource.id,
             let itemMetadata = request.item.simulatorMetadata,
             UUID(uuidString: itemMetadata.udid) == UUID(uuidString: udid),
+            let retainedName = itemMetadata.name,
+            itemMetadata.deviceTypeIdentifier != nil,
+            itemMetadata.runtimeIdentifier != nil,
+            request.item.label == retainedName,
             itemMetadata.isEligibleForDeletion
         else {
             throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
@@ -254,28 +271,17 @@ public actor SafeDeleter: ItemDeleting {
         try Self.validateOwnership(
             ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
 
-        let metadata = target.canonicalURL.appending(path: "device.plist")
-        let metadataKeys: Set<URLResourceKey> = [
-            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
-        ]
-        guard let values = try? metadata.resourceValues(forKeys: metadataKeys),
-            values.isRegularFile == true,
-            values.isSymbolicLink != true,
-            let size = values.fileSize,
-            size <= 64 * 1024,
-            let data = try? Data(contentsOf: metadata),
-            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
-            let dictionary = plist as? [String: Any],
-            let metadataUDID = dictionary["UDID"] as? String,
-            UUID(uuidString: metadataUDID) == UUID(uuidString: udid),
-            let state = (dictionary["state"] as? NSNumber)?.intValue
-        else {
-            throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
-        }
-        if state == 3 {
+        let currentMetadata = SimulatorDeviceMetadataReader().metadata(
+            in: target.canonicalURL,
+            leafUDID: udid,
+            standardNames: simulatorDeviceTypeNames.standardNamesByIdentifier())
+        if currentMetadata.isBooted {
             throw SafeDeleterError.simulatorBooted(udid)
         }
-        guard state == 1 else {
+        guard currentMetadata.isEligibleForDeletion,
+            currentMetadata == itemMetadata,
+            currentMetadata.name == request.item.label
+        else {
             throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
         }
 
