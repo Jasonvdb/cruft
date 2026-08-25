@@ -99,6 +99,29 @@ private struct FakeCacheSource: CacheSource {
     }
 }
 
+/// Scan and deletion roots differ so each engine gate test proves which root
+/// was used. Discovery can also produce a deterministic permission denial.
+private struct DistinctRootsSource: CacheSource {
+    static let id = CategoryID("distinct-roots")
+    let displayName = "Distinct Roots"
+    var permissionDenied = false
+
+    func scanRoot(context: ScanContext) -> URL? {
+        context.home.appending(path: "scan-root")
+    }
+
+    func allowedDeletionRoots(context: ScanContext) -> [URL] {
+        [context.home.appending(path: "deletion-root")]
+    }
+
+    func discover(context: ScanContext) async throws -> [CacheItem] {
+        if permissionDenied {
+            throw POSIXError(.EACCES)
+        }
+        return []
+    }
+}
+
 /// Measurer whose walks park until `open()` — and never return at all if it
 /// is never opened (the watchdog's "blocked syscall on a dead mount").
 private actor GatedMeasurer: DirectoryMeasurer {
@@ -342,6 +365,61 @@ private func makeFakeEngine(
     #expect(finishedSnapshots(openEvents).count == 1)
 }
 
+@Test func quietGateUsesScanRootInsteadOfDeletionRoot() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let scanRoot = try fixture.plantDir("scan-root")
+    let deletionRoot = try fixture.plantDir("deletion-root")
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSinceNow: -600)],
+        ofItemAtPath: deletionRoot.path(percentEncoded: false)
+    )
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date()],
+        ofItemAtPath: scanRoot.path(percentEncoded: false)
+    )
+    let engine = ScanEngine(
+        sources: [DistinctRootsSource()],
+        context: ScanContext(home: fixture.root),
+        measurer: FoundationMeasurer(),
+        deleter: RecordingDeleter(),
+        statsStore: nil,
+        quietWindow: 180,
+        watchdogTimeout: .seconds(60)
+    )
+    let box = collectEvents(of: engine)
+
+    await engine.refresh(categories: [DistinctRootsSource.id], trigger: .scheduled)
+    let events = await box.waitUntil { !deferrals($0).isEmpty }
+
+    #expect(deferrals(events).map(\.1) == [.buildActivityDetected])
+    #expect(finishedSnapshots(events).isEmpty)
+}
+
+@Test func nonLocalGateUsesScanRootThroughInjectedVolumeCheck() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    try fixture.plantDir("scan-root")
+    try fixture.plantDir("deletion-root")
+    let engine = ScanEngine(
+        sources: [DistinctRootsSource()],
+        context: ScanContext(home: fixture.root),
+        measurer: FoundationMeasurer(),
+        deleter: RecordingDeleter(),
+        statsStore: nil,
+        quietWindow: 180,
+        watchdogTimeout: .seconds(60),
+        volumeIsLocal: { $0.lastPathComponent != "scan-root" }
+    )
+    let box = collectEvents(of: engine)
+
+    await engine.refresh(categories: [DistinctRootsSource.id], trigger: .manual)
+    let events = await box.waitUntil { !deferrals($0).isEmpty }
+
+    #expect(deferrals(events).map(\.1) == [.nonLocalVolume])
+    #expect(finishedSnapshots(events).isEmpty)
+}
+
 // MARK: - Generations
 
 @Test func invalidateAndRescanDropsTheStaleWalkersEvents() async throws {
@@ -443,5 +521,28 @@ private func makeFakeEngine(
     let events = await box.waitUntil { !deferrals($0).isEmpty }
     #expect(deferrals(events).map(\.1) == [.permissionDenied])
     #expect(finishedSnapshots(events).isEmpty)
+    #expect(failures(events).isEmpty)
+}
+
+@Test func permissionGateUsesExistingScanRootInsteadOfMissingDeletionRoot() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    try fixture.plantDir("scan-root")
+    let engine = ScanEngine(
+        sources: [DistinctRootsSource(permissionDenied: true)],
+        context: ScanContext(home: fixture.root),
+        measurer: FoundationMeasurer(),
+        deleter: RecordingDeleter(),
+        statsStore: nil,
+        quietWindow: 180,
+        watchdogTimeout: .seconds(60),
+        volumeIsLocal: { _ in true }
+    )
+    let box = collectEvents(of: engine)
+
+    await engine.refresh(categories: [DistinctRootsSource.id], trigger: .manual)
+    let events = await box.waitUntil { !deferrals($0).isEmpty || !failures($0).isEmpty }
+
+    #expect(deferrals(events).map(\.1) == [.permissionDenied])
     #expect(failures(events).isEmpty)
 }

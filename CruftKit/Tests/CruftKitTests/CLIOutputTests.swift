@@ -9,7 +9,7 @@ import CruftKitTestSupport
 
 private let allCategoryIDs = [
     "derived-data", "in-repo-build", "cargo-target", "gradle", "swiftpm-cache",
-    "xcode-misc", "xcodebuild-mcp", "js-cache", "xcode-archives",
+    "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "js-cache", "xcode-archives",
 ]
 
 /// ByteCountFormatter varies space (regular vs narrow no-break) and unit
@@ -21,10 +21,11 @@ private func normalizedByteString(_ string: String) -> String {
         .lowercased()
 }
 
-@Test func jsonOutputMatchesFrozenSchemaExactly() throws {
+@Test func jsonOutputMatchesV2SchemaExactly() throws {
     let reports = [
         CLICategoryReport(
             id: "derived-data", displayName: "Xcode DerivedData",
+            supportsCleaning: true,
             bytes: 12288, itemCount: 2,
             items: [
                 CLIItemReport(path: "/tmp/fixture/A", label: "A", bytes: 4096, fileCount: 1),
@@ -33,10 +34,11 @@ private func normalizedByteString(_ string: String) -> String {
         ),
         CLICategoryReport(
             id: "gradle", displayName: "Gradle Caches",
+            supportsCleaning: false,
             bytes: 0, itemCount: 0, items: []
         ),
     ]
-    let expected = #"{"categories":[{"bytes":12288,"displayName":"Xcode DerivedData","id":"derived-data","itemCount":2,"items":[{"bytes":4096,"fileCount":1,"label":"A","path":"/tmp/fixture/A"},{"bytes":8192,"fileCount":2,"label":"B","path":"/tmp/fixture/B"}]},{"bytes":0,"displayName":"Gradle Caches","id":"gradle","itemCount":0,"items":[]}]}"#
+    let expected = #"{"categories":[{"bytes":12288,"displayName":"Xcode DerivedData","id":"derived-data","itemCount":2,"items":[{"bytes":4096,"fileCount":1,"label":"A","path":"/tmp/fixture/A"},{"bytes":8192,"fileCount":2,"label":"B","path":"/tmp/fixture/B"}],"supportsCleaning":true},{"bytes":0,"displayName":"Gradle Caches","id":"gradle","itemCount":0,"items":[],"supportsCleaning":false}]}"#
     #expect(try CLIReportCore.jsonOutput(reports) == expected)
 }
 
@@ -57,6 +59,7 @@ private func normalizedByteString(_ string: String) -> String {
         measurer: FoundationMeasurer()
     )
     #expect(reports.map(\.id) == SourceRegistry.allSources.map { $0.id.rawValue })
+    #expect(reports.map(\.supportsCleaning) == SourceRegistry.allSources.map(\.supportsCleaning))
     let counts = Dictionary(uniqueKeysWithValues: reports.map { ($0.id, $0.itemCount) })
     #expect(counts == FixtureHome.canonicalExpectedItemCounts)
     for report in reports {
@@ -91,7 +94,7 @@ private func normalizedByteString(_ string: String) -> String {
     let filtered = CLIReportCore.filteredSources(
         all, excluding: [CategoryID("derived-data"), CategoryID("js-cache")])
     #expect(filtered.map { $0.id.rawValue }
-        == ["in-repo-build", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "xcodebuild-mcp", "xcode-archives"])
+        == ["in-repo-build", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "xcode-archives"])
     #expect(CLIReportCore.filteredSources(all, excluding: []).map { $0.id.rawValue }
         == all.map { $0.id.rawValue })
     #expect(CLIReportCore.filteredSources(all, excluding: [CategoryID("bogus")]).count == all.count)
@@ -121,10 +124,12 @@ private func normalizedByteString(_ string: String) -> String {
     let reports = [
         CLICategoryReport(
             id: "derived-data", displayName: "Xcode DerivedData",
+            supportsCleaning: true,
             bytes: 12288, itemCount: 2, items: []
         ),
         CLICategoryReport(
-            id: "gradle", displayName: "Gradle Caches",
+            id: "simulator-device-data", displayName: "Simulator Device Data",
+            supportsCleaning: false,
             bytes: 4096, itemCount: 1, items: []
         ),
     ]
@@ -132,6 +137,7 @@ private func normalizedByteString(_ string: String) -> String {
     let lines = table.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     #expect(lines.count == 3)
     #expect(lines[0].hasPrefix("Xcode DerivedData"))
+    #expect(lines[1].hasPrefix("Simulator Device Data (view only)"))
     #expect(lines[2].hasPrefix("Total"))
     #expect(lines[2].contains("3"))
     for line in lines {
@@ -167,5 +173,6 @@ private func normalizedByteString(_ string: String) -> String {
     #expect(lines.dropFirst().map { String($0.split(separator: ":")[0]) } == allCategoryIDs)
     #expect(lines.contains("derived-data: 3"))
     #expect(lines.contains("xcodebuild-mcp: 1"))
+    #expect(lines.contains("simulator-device-data: 1"))
     #expect(lines.contains("xcode-archives: 3"))
 }

@@ -28,13 +28,15 @@ struct SettingsView: View {
         let isDestructive: Bool
     }
 
-    private static let categoryRows: [CategoryRow] = SourceRegistry.allSources.map { source in
-        CategoryRow(
-            id: source.id,
-            displayName: source.displayName,
-            isOptIn: source.isDestructive || !source.includedInCleanAllByDefault,
-            isDestructive: source.isDestructive)
-    }
+    private static let categoryRows: [CategoryRow] = SourceRegistry.allSources
+        .filter(\.supportsCleaning)
+        .map { source in
+            CategoryRow(
+                id: source.id,
+                displayName: source.displayName,
+                isOptIn: source.isDestructive || !source.includedInCleanAllByDefault,
+                isDestructive: source.isDestructive)
+        }
 
     var body: some View {
         Form {

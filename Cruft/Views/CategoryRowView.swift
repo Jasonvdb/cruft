@@ -19,6 +19,9 @@ struct CategoryRowView: View {
             if row.isDestructive {
                 badge("not re-derivable", color: .orange)
             }
+            if !row.supportsCleaning {
+                badge("view only", color: .secondary)
+            }
             if let status = statusBadge {
                 badge(status.text, color: status.color)
             }
@@ -38,17 +41,19 @@ struct CategoryRowView: View {
             Text(sizeText)
                 .monospacedDigit()
                 .foregroundStyle(row.bytes == nil ? .secondary : .primary)
-            // Always laid out, opacity-revealed on hover, so rows never
-            // shift when the pointer moves across them.
-            Button(action: onClean) {
-                Image(systemName: "trash")
+            if row.supportsCleaning {
+                // Always laid out for cleanable rows and revealed on hover,
+                // so the row does not shift when the pointer moves over it.
+                Button(action: onClean) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(cleanDisabled || !isCleanable)
+                .opacity(isHovering && isCleanable ? 1 : 0)
+                .accessibilityLabel("Clean \(row.displayName)")
+                .help("Clean \(row.displayName)…")
             }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .disabled(cleanDisabled || !isCleanable)
-            .opacity(isHovering && isCleanable ? 1 : 0)
-            .accessibilityLabel("Clean \(row.displayName)")
-            .help("Clean \(row.displayName)…")
         }
         .font(.callout)
         .help(helpText)

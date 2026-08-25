@@ -22,6 +22,17 @@ private func snapshot(_ id: String, itemBytes: [Int64]) -> CategorySnapshot {
 
 private let planner = CleanPlanner(sources: SourceRegistry.allSources)
 
+private struct ViewOnlySource: CacheSource {
+    static let id = CategoryID("view-only")
+    let displayName = "View Only"
+    let supportsCleaning = false
+    func allowedDeletionRoots(context: ScanContext) -> [URL] { [] }
+    func discover(context: ScanContext) async throws -> [CacheItem] { [] }
+}
+
+private let viewOnlyPlanner = CleanPlanner(
+    sources: SourceRegistry.allSources + [ViewOnlySource() as any CacheSource])
+
 @Test func cleanAllExcludesArchivesByDefaultEvenWithNonzeroSize() {
     let plan = planner.planCleanAll(snapshots: [
         snapshot("derived-data", itemBytes: [8192, 4096]),
@@ -113,6 +124,31 @@ private let planner = CleanPlanner(sources: SourceRegistry.allSources)
 
 @Test func planCategoryWithNoSnapshotIsEmpty() {
     let plan = planner.planCategory(CategoryID("derived-data"), snapshots: [])
+    #expect(plan.itemsByCategory.isEmpty)
+    #expect(plan.estimatedBytes == 0)
+    #expect(plan.warnings.isEmpty)
+}
+
+@Test func cleanAllExcludesViewOnlyCategoryEvenWhenUserIncluded() {
+    let plan = viewOnlyPlanner.planCleanAll(
+        snapshots: [
+            snapshot("derived-data", itemBytes: [8192]),
+            snapshot("view-only", itemBytes: [65536]),
+        ],
+        userIncluded: [ViewOnlySource.id]
+    )
+
+    #expect(Set(plan.itemsByCategory.keys) == [CategoryID("derived-data")])
+    #expect(plan.estimatedBytes == 8192)
+    #expect(plan.warnings.isEmpty)
+}
+
+@Test func viewOnlyCategoryPlanIsEmpty() {
+    let plan = viewOnlyPlanner.planCategory(
+        ViewOnlySource.id,
+        snapshots: [snapshot("view-only", itemBytes: [65536])]
+    )
+
     #expect(plan.itemsByCategory.isEmpty)
     #expect(plan.estimatedBytes == 0)
     #expect(plan.warnings.isEmpty)

@@ -11,6 +11,7 @@ public enum SourceRegistry {
             GradleSource(),
             SwiftPMCacheSource(),
             XcodeMiscSource(),
+            SimulatorDeviceDataSource(),
             XcodeBuildMCPSource(),
             JSCacheSource(),
             ArchivesSource(),

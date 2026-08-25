@@ -59,6 +59,9 @@ public actor ScanEngine {
     private let quietWindow: TimeInterval
     /// Watchdog: a category walk with no progress for this long is abandoned.
     private let watchdogTimeout: Duration
+    /// Injectable volume gate. Production reads URL volume metadata; tests
+    /// can prove root selection without a real remote mount.
+    private let volumeIsLocal: @Sendable (URL) -> Bool
 
     private enum CategoryState {
         case idle, scanning, cleaning
@@ -108,7 +111,10 @@ public actor ScanEngine {
         deleter: any ItemDeleting,
         statsStore: StatsStore?,
         quietWindow: TimeInterval,
-        watchdogTimeout: Duration
+        watchdogTimeout: Duration,
+        volumeIsLocal: @escaping @Sendable (URL) -> Bool = { root in
+            (try? root.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal != false
+        }
     ) {
         let (stream, continuation) = AsyncStream.makeStream(
             of: ScanEvent.self,
@@ -124,6 +130,7 @@ public actor ScanEngine {
         self.statsStore = statsStore
         self.quietWindow = quietWindow
         self.watchdogTimeout = watchdogTimeout
+        self.volumeIsLocal = volumeIsLocal
     }
 
     /// Discover + size the given categories (nil = all registered, minus
@@ -369,17 +376,17 @@ public actor ScanEngine {
         progress: ProgressBox
     ) async {
         gate.emit(.categoryStarted(category), category: category, generation: generation)
-        let roots = source.allowedDeletionRoots(context: context)
+        let scanRoot = source.scanRoot(context: context)?.cruftCanonical
 
-        if let root = roots.first, Self.isNonLocalVolume(root) {
+        if let scanRoot, !volumeIsLocal(scanRoot) {
             gate.emit(.deferred(category, reason: .nonLocalVolume), category: category, generation: generation)
             scanCompleted(category, generation: generation)
             return
         }
 
-        if trigger == .scheduled, let root = roots.first,
+        if trigger == .scheduled, let scanRoot,
             Self.recentlyModified(
-                root,
+                scanRoot,
                 includeChildren: category == DerivedDataSource.id,
                 within: quietWindow
             )
@@ -398,7 +405,7 @@ public actor ScanEngine {
             scanCompleted(category, generation: generation)
             return
         } catch {
-            if let root = roots.first, Self.exists(root), Self.isPermissionDenial(error) {
+            if let scanRoot, Self.exists(scanRoot), Self.isPermissionDenial(error) {
                 gate.emit(
                     .deferred(category, reason: .permissionDenied),
                     category: category, generation: generation)
@@ -494,12 +501,6 @@ public actor ScanEngine {
             if now.timeIntervalSince(modified) < window { return true }
         }
         return false
-    }
-
-    /// v1 refuses to size non-local volumes. A missing root has no volume to
-    /// judge — discovery handles it (nothing to clean).
-    private static func isNonLocalVolume(_ root: URL) -> Bool {
-        (try? root.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == false
     }
 
     /// iCloud Drive material is never sized or cleaned.

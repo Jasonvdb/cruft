@@ -3,6 +3,23 @@ import Testing
 @testable import CruftKit
 import CruftKitTestSupport
 
+private struct DefaultCleaningSource: CacheSource {
+    static let id = CategoryID("default-cleaning")
+    let displayName = "Default Cleaning"
+    func allowedDeletionRoots(context: ScanContext) -> [URL] {
+        [context.home.appending(path: "default-cleaning")]
+    }
+    func discover(context: ScanContext) async throws -> [CacheItem] { [] }
+}
+
+private struct ViewOnlyContractSource: CacheSource {
+    static let id = CategoryID("view-only-contract")
+    let displayName = "View Only"
+    let supportsCleaning = false
+    func allowedDeletionRoots(context: ScanContext) -> [URL] { [] }
+    func discover(context: ScanContext) async throws -> [CacheItem] { [] }
+}
+
 @Test func scanContextCanonicalizesHome() {
     // /tmp and /private/tmp must converge to ONE canonical form (macOS
     // Foundation strips the /private prefix), or SafeDeleter's prefix
@@ -52,4 +69,37 @@ import CruftKitTestSupport
     #expect(fixture.exists("Library/Caches/demo/payload.bin"))
     let requests = await deleter.requests
     #expect(requests.count == 1)
+}
+
+@Test func sourcesSupportCleaningByDefault() {
+    #expect(DefaultCleaningSource().supportsCleaning)
+    #expect(!ViewOnlyContractSource().supportsCleaning)
+}
+
+@Test func scanRootDefaultsToFirstDeletionRootWithoutCreatingOneForViewOnlySources() {
+    let context = ScanContext(home: URL(filePath: "/tmp/cruft-scan-root-contract"))
+    let cleanable = DefaultCleaningSource()
+
+    #expect(cleanable.scanRoot(context: context)
+        == cleanable.allowedDeletionRoots(context: context).first)
+    #expect(ViewOnlyContractSource().scanRoot(context: context) == nil)
+}
+
+@Test func viewOnlySourceRefusesDirectCleanBeforeDeletion() async {
+    let source = ViewOnlyContractSource()
+    let item = CacheItem(
+        categoryID: source.id,
+        url: URL(filePath: "/tmp/cruft-view-only-contract/item"),
+        label: "item"
+    )
+    let deleter = RecordingDeleter()
+
+    await #expect(throws: CacheSourceError.cleaningUnsupported(source.id)) {
+        try await source.clean(
+            item: item,
+            context: ScanContext(home: URL(filePath: "/tmp/cruft-view-only-contract")),
+            using: deleter
+        )
+    }
+    #expect(await deleter.requests.isEmpty)
 }

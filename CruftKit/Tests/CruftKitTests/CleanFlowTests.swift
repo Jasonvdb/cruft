@@ -49,10 +49,10 @@ private func finishedSnapshots(_ events: [ScanEvent]) -> [(CategoryID, CategoryS
     }
 }
 
-// MARK: - Decoys that must survive every clean
+// MARK: - Protected paths that must survive every clean
 
-/// Canonical-fixture decoy paths (relative to the fixture root). One entry
-/// per decoy family planted by `plantCanonicalFixtureHome`.
+/// Canonical-fixture protected paths (relative to the fixture root). The
+/// simulator device is visible in totals, but no clean path may remove it.
 private let decoyPaths = [
     "Library/Developer/CoreSimulator/Devices/8A1B2C3D-0000-4444-8888-CAFEBABED00D/data/Documents/precious.txt",
     "Library/Developer/CoreSimulator/Devices/uuid/device.plist",
@@ -97,17 +97,24 @@ private let decoyPaths = [
     #expect(snapshots.count == allIDs.count)
 
     // Clean All plan with empty user include/exclude (settings are Phase 6):
-    // the destructive Archives category must stay out.
+    // the destructive Archives category and view-only simulator data must
+    // stay out.
     let archives = CategoryID("xcode-archives")
+    let simulatorData = CategoryID("simulator-device-data")
     let plan = CleanPlanner(sources: SourceRegistry.allSources).planCleanAll(snapshots: snapshots)
     #expect(!plan.itemsByCategory.keys.contains(archives))
-    #expect(Set(plan.itemsByCategory.keys) == Set(allIDs).subtracting([archives]))
+    #expect(!plan.itemsByCategory.keys.contains(simulatorData))
+    #expect(Set(plan.itemsByCategory.keys) == Set(allIDs).subtracting([archives, simulatorData]))
     #expect(plan.estimatedBytes > 0)
 
     // MenuState mirrors the GUI: painted from the scanned snapshots.
     var menuState = MenuState(sources: SourceRegistry.allSources, persisted: snapshots)
     let archivesBytes = try #require(snapshots.first { $0.categoryID == archives }).totalBytes
-    #expect(menuState.displayedTotalBytes > archivesBytes)
+    let simulatorBytes = try #require(
+        snapshots.first { $0.categoryID == simulatorData }).totalBytes
+    let protectedBytes = archivesBytes + simulatorBytes
+    #expect(simulatorBytes > 0)
+    #expect(menuState.displayedTotalBytes > protectedBytes)
 
     var freedBytes: Int64 = 0
     var deletedPaths: [String] = []
@@ -140,7 +147,7 @@ private let decoyPaths = [
         }
     }
 
-    // Every decoy survives, and the unplanned Archives stay intact.
+    // Every protected path survives, and the unplanned Archives stay intact.
     for decoy in decoyPaths {
         #expect(fixture.exists(decoy), "decoy \(decoy) must survive Clean All")
     }
@@ -152,9 +159,10 @@ private let decoyPaths = [
     #expect(fixture.exists("\(FixtureHome.archivesRootPath)/x.xcarchive"))
 
     // noteCleaned dropped the cleaned rows' numbers immediately: the total
-    // shows only the (uncleaned) Archives, never a stale pre-clean value.
+    // shows only the uncleaned Archives and simulator data, never a stale
+    // pre-clean value.
     let cleanedIDs = Set(plan.itemsByCategory.keys)
-    #expect(menuState.displayedTotalBytes == archivesBytes)
+    #expect(menuState.displayedTotalBytes == protectedBytes)
 
     // Apply the engine's automatic .postClean rescan events in stream order;
     // a cleaned row must never repaint a stale (nonzero) value on the way to
@@ -168,7 +176,7 @@ private let decoyPaths = [
         for row in menuState.rows where cleanedIDs.contains(row.id) {
             #expect((row.bytes ?? 0) == 0, "\(row.id): stale bytes repainted mid-postClean")
         }
-        #expect(menuState.displayedTotalBytes <= archivesBytes)
+        #expect(menuState.displayedTotalBytes <= protectedBytes)
     }
     let postClean = finishedSnapshots(Array(allEvents.dropFirst(preCleanCount)))
         .filter { cleanedIDs.contains($0.0) }
