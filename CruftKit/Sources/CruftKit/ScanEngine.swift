@@ -14,12 +14,94 @@ public struct CleanOutcome: Sendable, Codable {
     }
 }
 
+/// A multi-item clean stopped after one or more items completed. Callers must
+/// apply `outcome` before they surface `underlyingError`; otherwise the UI and
+/// persisted stats can report paths that no longer exist. `completedItemIDs`
+/// lets a caller retry only the unfinished items, including `.contentsOnly`
+/// roots whose returned deleted paths are their children.
+public struct PartialCleanFailure: Error, CustomStringConvertible {
+    public let outcome: CleanOutcome
+    public let completedItemIDs: [String]
+    public let underlyingError: any Error
+
+    public init(
+        outcome: CleanOutcome,
+        completedItemIDs: [String],
+        underlyingError: any Error
+    ) {
+        self.outcome = outcome
+        self.completedItemIDs = completedItemIDs
+        self.underlyingError = underlyingError
+    }
+
+    public var description: String {
+        String(describing: underlyingError)
+    }
+}
+
 /// Why `ScanEngine.clean` refused to start.
 public enum ScanEngineError: Error, Equatable {
     /// The category id is not in this engine's source list.
     case unknownCategory(CategoryID)
     /// A clean of this category is already in flight.
     case cleanAlreadyRunning(CategoryID)
+    /// This source requires an explicit item subset.
+    case wholeCategoryCleaningUnsupported(CategoryID)
+}
+
+/// A bounded app clean retry could not make safe progress.
+public enum CleanRetryError: Error, Sendable, Equatable, CustomStringConvertible {
+    /// `SafeDeleter` reported a missing path that was not one of the exact
+    /// items still covered by the confirmed plan.
+    case missingPathNotInRemainingItems(String)
+    /// The bounded loop ended while confirmed plan items were still pending.
+    case retryLimitExceeded(remainingItemCount: Int)
+
+    public var description: String {
+        switch self {
+        case .missingPathNotInRemainingItems(let path):
+            "Clean retry stopped because the missing path was not in the remaining plan: \(path)"
+        case .retryLimitExceeded(let count):
+            "Clean retry limit reached with \(count) item(s) remaining."
+        }
+    }
+}
+
+/// Pure retry rules shared by the app and CruftKit tests.
+public enum CleanRetryPolicy {
+    /// Removes one or more exact remaining items matching `path`. A mismatch
+    /// is an error instead of a no-progress retry.
+    public static func removingMissingItem(
+        at path: String,
+        from remainingItems: [CacheItem]
+    ) throws -> [CacheItem] {
+        let missingPath = normalizedPath(path)
+        let retained = remainingItems.filter {
+            normalizedPath($0.url.path(percentEncoded: false)) != missingPath
+        }
+        guard retained.count < remainingItems.count else {
+            throw CleanRetryError.missingPathNotInRemainingItems(missingPath)
+        }
+        return retained
+    }
+
+    /// Returns an explicit terminal error whenever a bounded retry loop exits
+    /// with items still pending.
+    public static func terminalError(
+        remainingItems: [CacheItem]
+    ) -> CleanRetryError? {
+        remainingItems.isEmpty
+            ? nil
+            : .retryLimitExceeded(remainingItemCount: remainingItems.count)
+    }
+
+    private static func normalizedPath(_ rawPath: String) -> String {
+        var path = rawPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
 }
 
 /// Orchestrates discovery, sizing, and cleaning. Key invariants (frozen):
@@ -181,6 +263,12 @@ public actor ScanEngine {
         guard let source = source(for: category) else {
             throw ScanEngineError.unknownCategory(category)
         }
+        if items == nil, !source.allowsWholeCategoryCleaning {
+            throw ScanEngineError.wholeCategoryCleaningUnsupported(category)
+        }
+        if let invalid = items?.first(where: { !source.canClean(item: $0) }) {
+            throw CacheSourceError.itemCleaningUnsupported(category, invalid.id)
+        }
         guard states[category, default: .idle] != .cleaning else {
             throw ScanEngineError.cleanAlreadyRunning(category)
         }
@@ -189,6 +277,9 @@ public actor ScanEngine {
             startQueuedIfPossible()
         }
         states[category] = .cleaning
+        var deletedPaths: [String] = []
+        var completedItemIDs: [String] = []
+        var freeBefore: Int64?
         do {
             let resolved: [CacheItem]
             if let items {
@@ -199,11 +290,11 @@ public actor ScanEngine {
                 resolved = try await source.discover(context: context)
             }
 
-            let freeBefore = Self.freeBytes(onVolumeOf: context.home)
-            var deletedPaths: [String] = []
+            freeBefore = Self.freeBytes(onVolumeOf: context.home)
             for item in resolved {
                 let deleted = try await source.clean(item: item, context: context, using: deleter)
                 deletedPaths.append(contentsOf: deleted.map { $0.path(percentEncoded: false) })
+                completedItemIDs.append(item.id)
             }
             let freeAfter = Self.freeBytes(onVolumeOf: context.home)
             // Compensating write BEFORE the post-clean rescan is enqueued:
@@ -216,17 +307,36 @@ public actor ScanEngine {
             // Either statfs sample failing means the delta is meaningless:
             // report 0 freed rather than a phantom number (a one-sided
             // sample would otherwise leak the volume's total free space).
-            let freedBytes: Int64
-            if let freeBefore, let freeAfter {
-                freedBytes = max(0, freeAfter - freeBefore)
-            } else {
-                freedBytes = 0
-            }
+            let freedBytes = Self.freedBytes(before: freeBefore, after: freeAfter)
             return CleanOutcome(deletedPaths: deletedPaths, freedBytes: freedBytes)
         } catch {
+            if !completedItemIDs.isEmpty {
+                let outcome = CleanOutcome(
+                    deletedPaths: deletedPaths,
+                    freedBytes: Self.freedBytes(
+                        before: freeBefore,
+                        after: Self.freeBytes(onVolumeOf: context.home)))
+                // Apply the same compensating write as a complete clean before
+                // the rescan is enqueued or the typed partial result escapes.
+                if let statsStore {
+                    await statsStore.noteCleaned(
+                        category: category,
+                        deletedPaths: deletedPaths)
+                }
+                finishClean(category)
+                throw PartialCleanFailure(
+                    outcome: outcome,
+                    completedItemIDs: completedItemIDs,
+                    underlyingError: error)
+            }
             finishClean(category)
             throw error
         }
+    }
+
+    private static func freedBytes(before: Int64?, after: Int64?) -> Int64 {
+        guard let before, let after else { return 0 }
+        return max(0, after - before)
     }
 
     /// Quit path: cancel every task, clear the queue, bump every generation
@@ -465,13 +575,18 @@ public actor ScanEngine {
         if gate.isCurrent(generation, for: category) {
             gate.emit(.finished(category, snapshot), category: category, generation: generation)
             if let statsStore {
-                await statsStore.update(snapshot)
+                let updateToken = await statsStore.update(snapshot)
                 // The await above is a suspension point: a clean() may have
                 // started (bumping the generation) while this walker was
                 // suspended, making the just-persisted snapshot pre-clean
-                // truth. Re-check and compensate rather than persist fiction.
-                if !gate.isCurrent(generation, for: category) {
-                    await statsStore.invalidate(category: category)
+                // truth. Re-check and remove only this walker's own write. A
+                // later clean remainder or finished scan must survive.
+                if let updateToken,
+                    !gate.isCurrent(generation, for: category)
+                {
+                    await statsStore.invalidate(
+                        category: category,
+                        ifCurrent: updateToken)
                 }
             }
         }

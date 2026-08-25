@@ -211,3 +211,47 @@ private func statsFileURL(_ fixture: FixtureHome) -> URL {
     await store.flush()
     #expect(await store.load().isEmpty)
 }
+
+@Test func staleUpdateTokenCannotInvalidateNewerCleanOrScanTruth() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let category = CategoryID("derived-data")
+    let store = StatsStore(
+        fileURL: statsFileURL(fixture),
+        debounceInterval: .milliseconds(10))
+    let staleSnapshot = makeSnapshot("derived-data", bytes: 8_192)
+    let staleToken = try #require(await store.update(staleSnapshot))
+
+    let deletedPath = try #require(staleSnapshot.items.first)
+        .item.url.path(percentEncoded: false)
+    await store.noteCleaned(category: category, deletedPaths: [deletedPath])
+    #expect(!(await store.invalidate(category: category, ifCurrent: staleToken)))
+    await store.flush()
+
+    var reloaded = await StatsStore(fileURL: statsFileURL(fixture)).load()
+    var retained = try #require(reloaded.first { $0.categoryID == category })
+    #expect(retained.items.isEmpty)
+    #expect(retained.totalBytes == 0)
+
+    let newerSnapshot = makeSnapshot(
+        "derived-data",
+        bytes: 16_384,
+        updatedAt: Date(timeIntervalSinceNow: 1))
+    _ = await store.update(newerSnapshot)
+    #expect(!(await store.invalidate(category: category, ifCurrent: staleToken)))
+    await store.flush()
+
+    reloaded = await StatsStore(fileURL: statsFileURL(fixture)).load()
+    retained = try #require(reloaded.first { $0.categoryID == category })
+    #expect(retained.totalBytes == 16_384)
+
+    let currentCategory = CategoryID("gradle")
+    let currentToken = try #require(await store.update(
+        makeSnapshot("gradle", bytes: 4_096)))
+    #expect(await store.invalidate(
+        category: currentCategory,
+        ifCurrent: currentToken))
+    await store.flush()
+    reloaded = await StatsStore(fileURL: statsFileURL(fixture)).load()
+    #expect(!reloaded.contains { $0.categoryID == currentCategory })
+}

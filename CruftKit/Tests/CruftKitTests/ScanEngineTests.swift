@@ -122,6 +122,24 @@ private struct DistinctRootsSource: CacheSource {
     }
 }
 
+private enum InjectedDeletionFailure: Error, Equatable {
+    case secondRequest
+}
+
+/// Records every request, succeeds for the first, fails for the second, and
+/// succeeds on later requests so a retry can prove it does not repeat item A.
+private actor FailsSecondRequestDeleter: ItemDeleting {
+    private(set) var requestedPaths: [String] = []
+
+    func delete(_ request: DeletionRequest) async throws -> [URL] {
+        requestedPaths.append(request.item.url.path(percentEncoded: false))
+        if requestedPaths.count == 2 {
+            throw InjectedDeletionFailure.secondRequest
+        }
+        return [request.item.url]
+    }
+}
+
 /// Measurer whose walks park until `open()` — and never return at all if it
 /// is never opened (the watchdog's "blocked syscall on a dead mount").
 private actor GatedMeasurer: DirectoryMeasurer {
@@ -262,6 +280,133 @@ private func makeFakeEngine(
 }
 
 // MARK: - Clean interlock
+
+@Test func simulatorWholeCategoryCleanIsRefusedButExplicitSubsetRuns() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let deleter = RecordingDeleter()
+    let engine = ScanEngine(
+        sources: [SimulatorDeviceDataSource()],
+        context: ScanContext(home: fixture.root),
+        deleter: deleter)
+
+    await #expect(throws: ScanEngineError.wholeCategoryCleaningUnsupported(
+        SimulatorDeviceDataSource.id)) {
+        try await engine.clean(category: SimulatorDeviceDataSource.id)
+    }
+
+    let udid = "11111111-1111-4111-8111-111111111111"
+    let item = CacheItem(
+        categoryID: SimulatorDeviceDataSource.id,
+        url: fixture.url("Library/Developer/CoreSimulator/Devices/\(udid)"),
+        label: "iPhone 17 Pro",
+        deletionMode: .simulatorDevice,
+        simulatorMetadata: SimulatorDeviceMetadata(
+            udid: udid,
+            name: "iPhone 17 Pro",
+            deviceTypeIdentifier:
+                "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+            runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+            mainGroup: .xcode,
+            runtimeLabel: "iOS 26.4",
+            isBooted: false,
+            isDeletable: true))
+
+    let outcome = try await engine.clean(
+        category: SimulatorDeviceDataSource.id, items: [item])
+    #expect(outcome.deletedPaths == [item.url.path(percentEncoded: false)])
+    #expect(await deleter.requests.count == 1)
+}
+
+@Test func partialCleanFailureCarriesAndPersistsSuccessBeforeRetry() async throws {
+    let fixture = try FixtureHome.makeTemporary()
+    defer { try? fixture.destroy() }
+    let category = FakeCacheSource.id
+    let itemA = CacheItem(
+        categoryID: category,
+        url: fixture.url("fake-root/item-a"),
+        label: "item-a")
+    let itemB = CacheItem(
+        categoryID: category,
+        url: fixture.url("fake-root/item-b"),
+        label: "item-b")
+    let store = StatsStore(
+        fileURL: fixture.url("stats.json"),
+        debounceInterval: .milliseconds(10))
+    await store.update(CategorySnapshot(
+        categoryID: category,
+        items: [
+            MeasuredItem(
+                item: itemA,
+                size: ItemSize(allocatedBytes: 4_096, fileCount: 1)),
+            MeasuredItem(
+                item: itemB,
+                size: ItemSize(allocatedBytes: 8_192, fileCount: 1)),
+        ],
+        updatedAt: Date()))
+    await store.flush()
+
+    let deleter = FailsSecondRequestDeleter()
+    let engine = ScanEngine(
+        sources: [FakeCacheSource()],
+        context: ScanContext(home: fixture.root),
+        deleter: deleter,
+        statsStore: store)
+
+    var caught: PartialCleanFailure?
+    do {
+        _ = try await engine.clean(category: category, items: [itemA, itemB])
+        #expect(Bool(false), "the second deletion must fail")
+    } catch let failure as PartialCleanFailure {
+        caught = failure
+    }
+
+    let failure = try #require(caught)
+    #expect(failure.outcome.deletedPaths == [itemA.url.path(percentEncoded: false)])
+    #expect(failure.completedItemIDs == [itemA.id])
+    #expect(failure.underlyingError as? InjectedDeletionFailure == .secondRequest)
+    #expect(failure.outcome.freedBytes >= 0)
+
+    await store.flush()
+    let afterPartial = await StatsStore(fileURL: fixture.url("stats.json")).load()
+    let retained = try #require(afterPartial.first { $0.categoryID == category })
+    #expect(retained.items.map(\.item.id) == [itemB.id])
+    #expect(retained.totalBytes == 8_192)
+
+    let completed = Set(failure.completedItemIDs)
+    let retryItems = [itemA, itemB].filter { !completed.contains($0.id) }
+    let retryOutcome = try await engine.clean(category: category, items: retryItems)
+    #expect(retryOutcome.deletedPaths == [itemB.url.path(percentEncoded: false)])
+    #expect(await deleter.requestedPaths == [
+        itemA.url.path(percentEncoded: false),
+        itemB.url.path(percentEncoded: false),
+        itemB.url.path(percentEncoded: false),
+    ])
+    #expect(Set(failure.outcome.deletedPaths + retryOutcome.deletedPaths).count == 2)
+}
+
+@Test func cleanRetryPolicyRequiresProgressAndReportsExhaustion() throws {
+    let category = CategoryID("retry-test")
+    let item = CacheItem(
+        categoryID: category,
+        url: URL(filePath: "/tmp/fixture/retry-test/item-a"),
+        label: "item-a")
+
+    #expect(throws: CleanRetryError.missingPathNotInRemainingItems(
+        "/tmp/fixture/retry-test/not-planned")) {
+        _ = try CleanRetryPolicy.removingMissingItem(
+            at: "/tmp/fixture/retry-test/not-planned",
+            from: [item])
+    }
+
+    let removed = try CleanRetryPolicy.removingMissingItem(
+        at: item.url.path(percentEncoded: false) + "/",
+        from: [item])
+    #expect(removed.isEmpty)
+    #expect(CleanRetryPolicy.terminalError(remainingItems: removed) == nil)
+    #expect(CleanRetryPolicy.terminalError(remainingItems: [item])
+        == .retryLimitExceeded(remainingItemCount: 1))
+}
 
 @Test func cleanDuringScanCancelsItAndPostCleanRescanReportsFreedSpace() async throws {
     let fixture = try FixtureHome.makeTemporary()

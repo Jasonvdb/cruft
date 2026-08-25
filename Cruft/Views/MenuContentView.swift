@@ -27,7 +27,7 @@ struct MenuContentView: View {
             }
         }
         .padding(12)
-        .frame(width: 340)
+        .frame(width: 390)
         .onAppear { model.menuOpened() }
     }
 
@@ -46,11 +46,25 @@ struct MenuContentView: View {
 
         VStack(alignment: .leading, spacing: 7) {
             ForEach(model.menuState.rows) { row in
-                CategoryRowView(
-                    row: row,
-                    cleanDisabled: model.isCleaning,
-                    onClean: { model.requestClean(category: row.id) }
-                )
+                if row.id == SimulatorDeviceDataSource.id {
+                    VStack(alignment: .leading, spacing: 6) {
+                        CategoryRowView(
+                            row: row,
+                            cleanDisabled: model.isCleaning,
+                            showsCleanAction: false,
+                            onClean: {})
+                        SimulatorDeviceHierarchyView(
+                            hierarchy: model.simulatorHierarchy,
+                            cleanDisabled: model.isCleaning,
+                            onDelete: { model.requestDeleteSimulatorGroup($0) })
+                    }
+                } else {
+                    CategoryRowView(
+                        row: row,
+                        cleanDisabled: model.isCleaning,
+                        showsCleanAction: true,
+                        onClean: { model.requestClean(category: row.id) })
+                }
             }
         }
 

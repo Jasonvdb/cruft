@@ -1,16 +1,61 @@
+import Darwin
 import Foundation
 import Testing
 @testable import CruftKit
 import CruftKitTestSupport
 
 private let simulatorDevicesPath = "Library/Developer/CoreSimulator/Devices"
+private let iphoneType = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro"
+private let watchType = "com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-11-46mm"
+private let ios264 = "com.apple.CoreSimulator.SimRuntime.iOS-26-4"
+private let watchOS265 = "com.apple.CoreSimulator.SimRuntime.watchOS-26-5"
+
+private struct StubDeviceTypeNames: SimulatorDeviceTypeNameProviding {
+    var names: [String: String] = [
+        iphoneType: "iPhone 17 Pro",
+        watchType: "Apple Watch Series 11 (46mm)",
+    ]
+
+    func standardNamesByIdentifier() -> [String: String] { names }
+}
+
+private struct StubDirectProcessRunner: DirectProcessRunning {
+    let operation: @Sendable (URL, [String]) throws -> DirectProcessResult
+
+    func run(executable: URL, arguments: [String]) throws -> DirectProcessResult {
+        try operation(executable, arguments)
+    }
+}
+
+private func testSource(names: [String: String]? = nil) -> SimulatorDeviceDataSource {
+    SimulatorDeviceDataSource(
+        deviceTypeNames: StubDeviceTypeNames(names: names ?? StubDeviceTypeNames().names))
+}
+
+private func overwriteSimulatorState(
+    _ state: Any,
+    udid: String,
+    fixture: FixtureHome
+) throws {
+    let metadata: [String: Any] = [
+        "name": "iPhone 17 Pro",
+        "deviceType": iphoneType,
+        "runtime": ios264,
+        "UDID": udid,
+        "state": state,
+    ]
+    let data = try PropertyListSerialization.data(
+        fromPropertyList: metadata, format: .xml, options: 0)
+    try data.write(to: fixture.url(
+        "\(simulatorDevicesPath)/\(udid)/device.plist"))
+}
 
 @Suite("SimulatorDeviceDataSource")
 struct SimulatorDeviceDataSourceTests {
     @Test func missingAndEmptyRootsReturnNoItems() async throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
-        let source = SimulatorDeviceDataSource()
+        let source = testSource()
         let context = ScanContext(home: fixture.root)
 
         #expect(try await source.discover(context: context).isEmpty)
@@ -18,33 +63,100 @@ struct SimulatorDeviceDataSourceTests {
         #expect(try await source.discover(context: context).isEmpty)
     }
 
-    @Test func validDirectUUIDDirectoriesAreSortedAndUseSafeMetadataNames() async throws {
+    @Test func classifiesStandardAndCustomNamesByRuntimeAndBootState() async throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
-        let firstUUID = "11111111-1111-4111-8111-111111111111"
-        let secondUUID = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"
-        _ = try fixture.plantSimulatorDeviceDecoy(uuid: secondUUID, name: "iPhone 16 Pro")
-        _ = try fixture.plantSimulatorDeviceDecoy(uuid: firstUUID)
+        let xcodeUDID = "11111111-1111-4111-8111-111111111111"
+        let flowUDID = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: flowUDID,
+            name: "SaySolid-feature-iPad",
+            deviceType: watchType,
+            runtime: watchOS265,
+            metadataUDID: flowUDID,
+            state: 3)
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: xcodeUDID,
+            name: "iPhone 17 Pro",
+            deviceType: iphoneType,
+            runtime: ios264,
+            metadataUDID: xcodeUDID,
+            state: 1)
 
-        let items = try await SimulatorDeviceDataSource().discover(
-            context: ScanContext(home: fixture.root))
+        let items = try await testSource().discover(context: ScanContext(home: fixture.root))
 
-        #expect(items.map(\.url.lastPathComponent) == [firstUUID, secondUUID])
-        #expect(items.map(\.label) == [firstUUID, "iPhone 16 Pro"])
-        #expect(items.allSatisfy { $0.categoryID == SimulatorDeviceDataSource.id })
-        #expect(items.allSatisfy { $0.deletionMode == .entireItem })
+        #expect(items.map(\.url.lastPathComponent) == [xcodeUDID, flowUDID])
+        #expect(items.map(\.label) == ["iPhone 17 Pro", "SaySolid-feature-iPad"])
+        #expect(items.map(\.simulatorMetadata?.name)
+            == ["iPhone 17 Pro", "SaySolid-feature-iPad"])
+        #expect(items.map(\.simulatorMetadata?.deviceTypeIdentifier)
+            == [iphoneType, watchType])
+        #expect(items.map(\.simulatorMetadata?.runtimeIdentifier)
+            == [ios264, watchOS265])
+        #expect(items.map(\.simulatorMetadata?.mainGroup) == [.xcode, .other])
+        #expect(items.map(\.simulatorMetadata?.runtimeLabel) == ["iOS 26.4", "watchOS 26.5"])
+        #expect(items[0].simulatorMetadata?.isBooted == false)
+        #expect(items[0].simulatorMetadata?.isDeletable == true)
+        #expect(items[1].simulatorMetadata?.isBooted == true)
+        #expect(items[1].simulatorMetadata?.isDeletable == false)
+        #expect(items.allSatisfy { $0.deletionMode == .simulatorDevice })
+        #expect(testSource().canClean(item: items[0]))
+        #expect(!testSource().canClean(item: items[1]))
     }
 
-    @Test func unsafeMetadataNameFallsBackToUUID() async throws {
+    @Test func missingMalformedMismatchedAndUnresolvedMetadataStayUnknown() async throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
-        let uuid = "22222222-2222-4222-8222-222222222222"
-        _ = try fixture.plantSimulatorDeviceDecoy(uuid: uuid, name: "unsafe/name")
+        let missing = "11111111-1111-4111-8111-111111111111"
+        let malformed = "22222222-2222-4222-8222-222222222222"
+        let mismatch = "33333333-3333-4333-8333-333333333333"
+        let unresolved = "44444444-4444-4444-8444-444444444444"
+        _ = try fixture.plantSimulatorDeviceDecoy(uuid: missing)
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: malformed, name: "unsafe/name", deviceType: iphoneType,
+            runtime: "bad-runtime", metadataUDID: malformed, state: 1)
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: mismatch, name: "iPhone 17 Pro", deviceType: iphoneType,
+            runtime: ios264, metadataUDID: missing, state: 1)
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: unresolved, name: "Custom", deviceType: "unknown-type",
+            runtime: ios264, metadataUDID: unresolved, state: 1)
 
-        let item = try #require(try await SimulatorDeviceDataSource().discover(
-            context: ScanContext(home: fixture.root)).first)
+        let items = try await testSource().discover(context: ScanContext(home: fixture.root))
 
-        #expect(item.label == uuid)
+        #expect(items.count == 4)
+        #expect(items.allSatisfy { $0.simulatorMetadata?.mainGroup == .unknown })
+        #expect(items.allSatisfy { $0.simulatorMetadata?.isDeletable == false })
+        #expect(items.first { $0.url.lastPathComponent == malformed }?.label == malformed)
+        #expect(items.first { $0.url.lastPathComponent == mismatch }?
+            .simulatorMetadata?.runtimeLabel == "iOS 26.4")
+    }
+
+    @Test func booleanAndFloatingStatesStayUnknownAndNeverReachDeletionSeam() async throws {
+        let fixture = try FixtureHome.makeTemporary()
+        defer { try? fixture.destroy() }
+        let booleanState = "55555555-5555-4555-8555-555555555555"
+        let floatingState = "66666666-6666-4666-8666-666666666666"
+        _ = try fixture.plantSimulatorDeviceDecoy(uuid: booleanState)
+        _ = try fixture.plantSimulatorDeviceDecoy(uuid: floatingState)
+        try overwriteSimulatorState(true, udid: booleanState, fixture: fixture)
+        try overwriteSimulatorState(1.5, udid: floatingState, fixture: fixture)
+        let source = testSource()
+        let context = ScanContext(home: fixture.root)
+
+        let items = try await source.discover(context: context)
+
+        #expect(items.count == 2)
+        #expect(items.allSatisfy { $0.simulatorMetadata?.mainGroup == .unknown })
+        #expect(items.allSatisfy { $0.simulatorMetadata?.isDeletable == false })
+        #expect(items.allSatisfy { !source.canClean(item: $0) })
+        let deleter = RecordingDeleter()
+        for item in items {
+            await #expect(throws: CacheSourceError.itemCleaningUnsupported(source.id, item.id)) {
+                try await source.clean(item: item, context: context, using: deleter)
+            }
+        }
+        #expect(await deleter.requests.isEmpty)
     }
 
     @Test func invalidDirectoriesFilesSymlinksAndNestedUUIDsAreIgnored() async throws {
@@ -61,19 +173,17 @@ struct SimulatorDeviceDataSourceTests {
             to: linkTarget.path(percentEncoded: false))
         try fixture.plantDir("\(simulatorDevicesPath)/not-a-uuid/\(nestedUUID)")
 
-        let items = try await SimulatorDeviceDataSource().discover(
-            context: ScanContext(home: fixture.root))
-
-        #expect(items.isEmpty)
+        #expect(try await testSource().discover(
+            context: ScanContext(home: fixture.root)).isEmpty)
     }
 
-    @Test func viewOnlySourceHasNoDeletionRoots() throws {
+    @Test func deletionRootIsExactDevicesDirectory() throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
-        let source = SimulatorDeviceDataSource()
+        let source = testSource()
         let context = ScanContext(home: fixture.root)
 
-        #expect(source.allowedDeletionRoots(context: context).isEmpty)
+        #expect(source.allowedDeletionRoots(context: context) == [fixture.url(simulatorDevicesPath)])
         #expect(source.scanRoot(context: context) == fixture.url(simulatorDevicesPath))
     }
 
@@ -88,41 +198,125 @@ struct SimulatorDeviceDataSourceTests {
         try fixture.plantDir("Library/Developer")
         try fixture.plantSymlink(
             at: "Library/Developer/CoreSimulator",
-            to: outside.url("Library/Developer/CoreSimulator").path(percentEncoded: false)
-        )
+            to: outside.url("Library/Developer/CoreSimulator").path(percentEncoded: false))
 
-        let items = try await SimulatorDeviceDataSource().discover(
-            context: ScanContext(home: fixture.root))
+        let items = try await testSource().discover(context: ScanContext(home: fixture.root))
 
         #expect(items.isEmpty)
         #expect(outside.exists(
             "\(simulatorDevicesPath)/8A1B2C3D-0000-4444-8888-CAFEBABED00D/data/Documents/precious.txt"))
     }
 
-    @Test func directCleanRefusesWithoutCallingTheDeleter() async throws {
+    @Test func unknownItemRefusesBeforeCallingDeleter() async throws {
         let fixture = try FixtureHome.makeTemporary()
         defer { try? fixture.destroy() }
         _ = try fixture.plantSimulatorDeviceDecoy()
-        let source = SimulatorDeviceDataSource()
+        let source = testSource()
         let context = ScanContext(home: fixture.root)
         let item = try #require(try await source.discover(context: context).first)
         let deleter = RecordingDeleter()
 
-        await #expect(throws: CacheSourceError.cleaningUnsupported(source.id)) {
+        await #expect(throws: CacheSourceError.itemCleaningUnsupported(source.id, item.id)) {
             try await source.clean(item: item, context: context, using: deleter)
         }
         #expect(await deleter.requests.isEmpty)
-        #expect(fixture.exists(
-            "\(simulatorDevicesPath)/8A1B2C3D-0000-4444-8888-CAFEBABED00D/data/Documents/precious.txt"))
     }
 
-    @Test func categoryMetadataIsStableAndViewOnly() {
-        let source = SimulatorDeviceDataSource()
+    @Test func eligibleExactItemRoutesThroughDeletionSeam() async throws {
+        let fixture = try FixtureHome.makeTemporary()
+        defer { try? fixture.destroy() }
+        let udid = "11111111-1111-4111-8111-111111111111"
+        _ = try fixture.plantSimulatorDeviceDecoy(
+            uuid: udid, name: "iPhone 17 Pro", deviceType: iphoneType,
+            runtime: ios264, metadataUDID: udid, state: 1)
+        let source = testSource()
+        let context = ScanContext(home: fixture.root)
+        let item = try #require(try await source.discover(context: context).first)
+        let deleter = RecordingDeleter()
+
+        let urls = try await source.clean(item: item, context: context, using: deleter)
+
+        #expect(urls == [item.url])
+        #expect(await deleter.requests.count == 1)
+        #expect(fixture.exists("\(simulatorDevicesPath)/\(udid)"))
+    }
+
+    @Test func categoryMetadataIsStableAndSubgroupOnly() {
+        let source = testSource()
 
         #expect(source.id == CategoryID("simulator-device-data"))
         #expect(source.displayName == "Simulator Device Data")
-        #expect(!source.supportsCleaning)
+        #expect(source.supportsCleaning)
+        #expect(!source.allowsWholeCategoryCleaning)
         #expect(!source.includedInCleanAllByDefault)
-        #expect(!source.isDestructive)
+        #expect(source.isDestructive)
+        #expect(source.destructiveWarning == SimulatorDeviceDataSource.warning)
+    }
+
+    @Test func boundedProcessRunnerTimesOutPromptly() {
+        let runner = BoundedDirectProcessRunner(timeout: 0.01, maximumOutputBytes: 1024)
+        let started = Date()
+
+        #expect(throws: DirectProcessError.timedOut(
+            executable: "/bin/sleep", seconds: 0.01)) {
+            _ = try runner.run(executable: URL(filePath: "/bin/sleep"), arguments: ["2"])
+        }
+        #expect(Date().timeIntervalSince(started) < 1)
+    }
+
+    @Test func boundedProcessRunnerCapturesAndCapsSuccessfulOutput() throws {
+        let runner = BoundedDirectProcessRunner(timeout: 1, maximumOutputBytes: 4)
+
+        let result = try runner.run(
+            executable: URL(filePath: "/usr/bin/printf"), arguments: ["abcdef"])
+
+        #expect(result.status == 0)
+        #expect(String(decoding: result.standardOutput, as: UTF8.self) == "abcd")
+        #expect(result.standardError.isEmpty)
+        #expect(result.outputWasTruncated)
+    }
+
+    @Test func boundedProcessRunnerKillsPipeInheritingChildGroup() throws {
+        let fixture = try FixtureHome.makeTemporary()
+        defer { try? fixture.destroy() }
+        let childPIDFile = fixture.url("pipe-child.pid")
+        let runner = BoundedDirectProcessRunner(timeout: 0.05, maximumOutputBytes: 1024)
+        let started = Date()
+
+        // The shell is a test helper only. Production always launches the
+        // supplied executable directly. `sleep` inherits both output pipes.
+        #expect(throws: DirectProcessError.timedOut(
+            executable: "/bin/sh", seconds: 0.05)) {
+            _ = try runner.run(
+                executable: URL(filePath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "/bin/sleep 5 & child=$!; printf '%s' \"$child\" > \"$1\"; wait",
+                    "runner-test",
+                    childPIDFile.path(percentEncoded: false),
+                ])
+        }
+        #expect(Date().timeIntervalSince(started) < 1)
+
+        let childPIDText = try String(contentsOf: childPIDFile, encoding: .utf8)
+        let childPID = try #require(pid_t(childPIDText))
+        let deadline = Date().addingTimeInterval(1)
+        while Darwin.kill(childPID, 0) == 0, Date() < deadline {
+            Darwin.usleep(2_000)
+        }
+        #expect(Darwin.kill(childPID, 0) == -1)
+        #expect(errno == ESRCH)
+    }
+
+    @Test func deviceTypeListingTimeoutReturnsNoClassifications() {
+        let runner = StubDirectProcessRunner { executable, arguments in
+            #expect(executable == URL(filePath: "/usr/bin/xcrun"))
+            #expect(arguments == ["simctl", "list", "devicetypes", "--json"])
+            throw DirectProcessError.timedOut(
+                executable: executable.path(percentEncoded: false), seconds: 0.01)
+        }
+        let provider = SystemSimulatorDeviceTypeNameProvider(processRunner: runner)
+
+        #expect(provider.standardNamesByIdentifier().isEmpty)
     }
 }

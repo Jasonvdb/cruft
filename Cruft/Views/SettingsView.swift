@@ -29,7 +29,7 @@ struct SettingsView: View {
     }
 
     private static let categoryRows: [CategoryRow] = SourceRegistry.allSources
-        .filter(\.supportsCleaning)
+        .filter { $0.supportsCleaning && $0.allowsWholeCategoryCleaning }
         .map { source in
             CategoryRow(
                 id: source.id,

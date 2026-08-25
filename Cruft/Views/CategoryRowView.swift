@@ -8,6 +8,7 @@ import SwiftUI
 struct CategoryRowView: View {
     let row: MenuState.Row
     let cleanDisabled: Bool
+    let showsCleanAction: Bool
     let onClean: () -> Void
 
     @State private var isHovering = false
@@ -41,7 +42,7 @@ struct CategoryRowView: View {
             Text(sizeText)
                 .monospacedDigit()
                 .foregroundStyle(row.bytes == nil ? .secondary : .primary)
-            if row.supportsCleaning {
+            if row.supportsCleaning && showsCleanAction {
                 // Always laid out for cleanable rows and revealed on hover,
                 // so the row does not shift when the pointer moves over it.
                 Button(action: onClean) {
@@ -131,5 +132,156 @@ struct CategoryRowView: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .background(.quaternary, in: Capsule())
+    }
+}
+
+/// Simulator storage uses two identity sections and runtime subgroups. Only a
+/// complete runtime subgroup exposes deletion; parent and identity rows never
+/// do. The compact indentation makes the safety boundary visible without
+/// adding decorative UI to this menu-bar utility.
+struct SimulatorDeviceHierarchyView: View {
+    let hierarchy: SimulatorHierarchy
+    let cleanDisabled: Bool
+    let onDelete: (SimulatorHierarchy.RuntimeGroup) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(hierarchy.sections) { section in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Text(section.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        if section.mainGroup == .other {
+                            Image(systemName: "info.circle")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .accessibilityLabel("About Other simulators")
+                                .help(
+                                    "CoreSimulator does not record creator identity. "
+                                        + "Other includes Flow and custom-named devices.")
+                        }
+                    }
+
+                    if section.runtimeGroups.isEmpty {
+                        Text("No devices")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 12)
+                    } else {
+                        ForEach(section.runtimeGroups) { group in
+                            SimulatorRuntimeRowView(
+                                group: group,
+                                cleanDisabled: cleanDisabled,
+                                onDelete: { onDelete(group) })
+                                .padding(.leading, 12)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.leading, 12)
+    }
+}
+
+private struct SimulatorRuntimeRowView: View {
+    let group: SimulatorHierarchy.RuntimeGroup
+    let cleanDisabled: Bool
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(group.runtimeLabel)
+                .lineLimit(1)
+            ForEach(group.blockingReasons) { reason in
+                badge(reason.badgeText, color: reason.badgeColor)
+                    .help(reason.helpText)
+            }
+            Spacer(minLength: 8)
+            Text(deviceCountText)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+            Text(AppModel.formattedBytes(group.allocatedBytes))
+                .monospacedDigit()
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(cleanDisabled || !group.isDeletable)
+            .opacity(isHovering ? 1 : 0)
+            .accessibilityLabel(
+                "Delete \(group.mainGroup.displayName) \(group.runtimeLabel) simulators")
+            .help(actionHelp)
+        }
+        .font(.caption)
+        .contentShape(Rectangle())
+        .help(rowHelp)
+        .onHover { isHovering = $0 }
+    }
+
+    private var deviceCountText: String {
+        "\(group.deviceCount) \(group.deviceCount == 1 ? "device" : "devices")"
+    }
+
+    private var actionHelp: String {
+        if cleanDisabled { return "Wait for the current deletion to finish." }
+        return rowHelp
+    }
+
+    private var rowHelp: String {
+        if group.blockingReasons.contains(.booted) {
+            return "Delete is unavailable because at least one simulator is booted. "
+                + "Shut down every simulator in this runtime group."
+        }
+        if group.blockingReasons.contains(.unknownMetadata) {
+            return "Delete is unavailable because simulator metadata is unknown. "
+                + "Refresh to scan it again."
+        }
+        if group.blockingReasons.contains(.notReady) {
+            return "Delete is unavailable because at least one simulator is not shut down."
+        }
+        return "Delete all \(deviceCountText) in "
+            + "\(group.mainGroup.displayName) / \(group.runtimeLabel)…"
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(color)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(.quaternary, in: Capsule())
+    }
+}
+
+private extension SimulatorHierarchy.DeletionBlockReason {
+    var badgeText: String {
+        switch self {
+        case .booted: "booted"
+        case .unknownMetadata: "unknown"
+        case .notReady: "not ready"
+        }
+    }
+
+    var badgeColor: Color {
+        switch self {
+        case .booted, .notReady: .orange
+        case .unknownMetadata: .secondary
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .booted:
+            "At least one simulator is booted. Shut down every simulator in this group."
+        case .unknownMetadata:
+            "At least one simulator has unknown metadata. Refresh to scan it again."
+        case .notReady:
+            "At least one simulator is not shut down."
+        }
     }
 }

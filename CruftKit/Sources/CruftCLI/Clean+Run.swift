@@ -26,6 +26,11 @@ extension Clean {
             printToStandardError("clean refused: \(source.displayName) is view only.")
             throw ExitCode(EX_USAGE)
         }
+        guard source.allowsWholeCategoryCleaning else {
+            printToStandardError(
+                "clean refused: \(source.displayName) requires an explicit subgroup selection in the app.")
+            throw ExitCode(EX_USAGE)
+        }
 
         let items = try await source.discover(context: scanContext)
             .sorted { $0.url.path(percentEncoded: false) < $1.url.path(percentEncoded: false) }
@@ -38,8 +43,8 @@ extension Clean {
             entries.append((item: item, bytes: size.allocatedBytes))
         }
 
-        if source.isDestructive {
-            printToStandardError("WARNING: " + CleanPlanner.destructiveWarning)
+        if source.isDestructive, let warning = source.destructiveWarning {
+            printToStandardError("WARNING: " + warning)
         }
 
         let live = yes && !dryRun

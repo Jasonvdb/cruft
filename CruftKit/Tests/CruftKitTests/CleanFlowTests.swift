@@ -52,7 +52,7 @@ private func finishedSnapshots(_ events: [ScanEvent]) -> [(CategoryID, CategoryS
 // MARK: - Protected paths that must survive every clean
 
 /// Canonical-fixture protected paths (relative to the fixture root). The
-/// simulator device is visible in totals, but no clean path may remove it.
+/// simulator device is visible in totals, but broad clean paths cannot remove it.
 private let decoyPaths = [
     "Library/Developer/CoreSimulator/Devices/8A1B2C3D-0000-4444-8888-CAFEBABED00D/data/Documents/precious.txt",
     "Library/Developer/CoreSimulator/Devices/uuid/device.plist",
@@ -97,7 +97,7 @@ private let decoyPaths = [
     #expect(snapshots.count == allIDs.count)
 
     // Clean All plan with empty user include/exclude (settings are Phase 6):
-    // the destructive Archives category and view-only simulator data must
+    // the destructive Archives category and subgroup-only simulator data must
     // stay out.
     let archives = CategoryID("xcode-archives")
     let simulatorData = CategoryID("simulator-device-data")
@@ -143,6 +143,8 @@ private let decoyPaths = [
                     "\(id): root \(path) must survive a contentsOnly clean")
                 let children = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
                 #expect(children.isEmpty, "\(id): \(path) should be emptied, found \(children)")
+            case .simulatorDevice:
+                Issue.record("simulator devices must not enter Clean All")
             }
         }
     }

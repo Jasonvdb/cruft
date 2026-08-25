@@ -21,11 +21,19 @@ public struct CLIItemReport: Sendable, Equatable, Encodable {
     }
 }
 
-/// One category in the v2 `cruft-cli scan --json` schema. Category
+public enum CLICleaningScope: String, Sendable, Equatable, Encodable {
+    case wholeCategory
+    case appSubgroupOnly
+    case none
+}
+
+/// One category in the v3 `cruft-cli scan --json` schema. Category
 /// order is registry order; `items` are sorted by path.
 public struct CLICategoryReport: Sendable, Equatable, Encodable {
     public let id: String
     public let displayName: String
+    public let cleaningScope: CLICleaningScope
+    /// Whether `cruft-cli clean --category` accepts this category.
     public let supportsCleaning: Bool
     public let bytes: Int64
     public let itemCount: Int
@@ -34,6 +42,7 @@ public struct CLICategoryReport: Sendable, Equatable, Encodable {
     public init(
         id: String,
         displayName: String,
+        cleaningScope: CLICleaningScope,
         supportsCleaning: Bool,
         bytes: Int64,
         itemCount: Int,
@@ -41,6 +50,7 @@ public struct CLICategoryReport: Sendable, Equatable, Encodable {
     ) {
         self.id = id
         self.displayName = displayName
+        self.cleaningScope = cleaningScope
         self.supportsCleaning = supportsCleaning
         self.bytes = bytes
         self.itemCount = itemCount
@@ -48,7 +58,7 @@ public struct CLICategoryReport: Sendable, Equatable, Encodable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, displayName, supportsCleaning, bytes, itemCount, items
+        case id, displayName, cleaningScope, supportsCleaning, bytes, itemCount, items
     }
 }
 
@@ -100,10 +110,19 @@ public enum CLIReportCore {
                 }
             }
             itemReports.sort { $0.path < $1.path }
+            let cleaningScope: CLICleaningScope
+            if !source.supportsCleaning {
+                cleaningScope = .none
+            } else if source.allowsWholeCategoryCleaning {
+                cleaningScope = .wholeCategory
+            } else {
+                cleaningScope = .appSubgroupOnly
+            }
             reports.append(CLICategoryReport(
                 id: source.id.rawValue,
                 displayName: source.displayName,
-                supportsCleaning: source.supportsCleaning,
+                cleaningScope: cleaningScope,
+                supportsCleaning: cleaningScope == .wholeCategory,
                 bytes: itemReports.reduce(0) { $0 + $1.bytes },
                 itemCount: itemReports.count,
                 items: itemReports
@@ -112,7 +131,7 @@ public enum CLIReportCore {
         return reports
     }
 
-    /// The v2 scan JSON document: compact, sorted keys, unescaped
+    /// The v3 scan JSON document: compact, sorted keys, unescaped
     /// slashes, no trailing newline (the caller's `print` supplies it).
     public static func jsonOutput(_ reports: [CLICategoryReport]) throws -> String {
         let encoder = JSONEncoder()
@@ -125,9 +144,15 @@ public enum CLIReportCore {
     /// total line. No trailing whitespace on any line.
     public static func humanScanTable(_ reports: [CLICategoryReport]) -> String {
         var rows = reports.map { report in
-            let name = report.supportsCleaning
-                ? report.displayName
-                : "\(report.displayName) (view only)"
+            let name: String
+            switch report.cleaningScope {
+            case .wholeCategory:
+                name = report.displayName
+            case .appSubgroupOnly:
+                name = "\(report.displayName) (app subgroup only)"
+            case .none:
+                name = "\(report.displayName) (view only)"
+            }
             return (name: name, count: String(report.itemCount), size: formattedBytes(report.bytes))
         }
         rows.append((
@@ -204,7 +229,7 @@ public enum CLIReportCore {
     }
 
     /// Percent-decoded absolute path with any trailing slash stripped — the
-    /// spelling the v2 JSON schema requires.
+    /// spelling the v3 JSON schema requires.
     public static func normalizedPath(_ url: URL) -> String {
         var path = url.path(percentEncoded: false)
         while path.count > 1 && path.hasSuffix("/") {

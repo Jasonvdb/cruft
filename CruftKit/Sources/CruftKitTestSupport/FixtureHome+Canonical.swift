@@ -10,8 +10,9 @@ import Foundation
 extension FixtureHome {
     /// Plants every category's fixtures plus the standard protected entries
     /// (CoreSimulator Devices, DeviceSupport, node_modules, .git, hidden
-    /// dirs) that must survive every applicable clean. Simulator Devices are
-    /// discovered only by their view-only source.
+    /// dirs) that must survive every applicable broad clean. The canonical
+    /// simulator has no complete metadata, so it remains visible but cannot
+    /// be selected for deletion.
     public func plantCanonicalFixtureHome() throws {
         // derived-data: two projects + a shared cache (3 items)
         try plantDerivedDataRoot()
@@ -47,7 +48,7 @@ extension FixtureHome {
         _ = try plantXcodeCacheFixture()
         _ = try plantSimulatorCachesFixture()
 
-        // simulator-device-data: one protected, view-only device (1 item)
+        // simulator-device-data: one protected, unclassified device (1 item)
         _ = try plantSimulatorDeviceDecoy()
 
         // xcodebuild-mcp: one workspace (1 item) + the config decoys at the

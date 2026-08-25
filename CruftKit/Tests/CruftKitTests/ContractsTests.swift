@@ -72,8 +72,78 @@ private struct ViewOnlyContractSource: CacheSource {
 }
 
 @Test func sourcesSupportCleaningByDefault() {
-    #expect(DefaultCleaningSource().supportsCleaning)
+    let source = DefaultCleaningSource()
+    #expect(source.supportsCleaning)
+    #expect(source.allowsWholeCategoryCleaning)
+    #expect(source.destructiveWarning == nil)
+    #expect(source.canClean(item: CacheItem(
+        categoryID: source.id, url: URL(filePath: "/tmp/default-cleaning/item"), label: "item")))
+    #expect(!source.canClean(item: CacheItem(
+        categoryID: CategoryID("other"), url: URL(filePath: "/tmp/other/item"), label: "item")))
     #expect(!ViewOnlyContractSource().supportsCleaning)
+    #expect(!ViewOnlyContractSource().allowsWholeCategoryCleaning)
+}
+
+@Test func cacheItemDecodesV2SnapshotWithoutSimulatorMetadata() throws {
+    let original = CacheItem(
+        categoryID: CategoryID("demo"),
+        url: URL(filePath: "/tmp/cruft-v2/cache/item"),
+        label: "item")
+    let encoded = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(CacheItem.self, from: encoded)
+
+    #expect(decoded == original)
+    #expect(decoded.simulatorMetadata == nil)
+}
+
+@Test func simulatorMetadataRoundTripsWithCacheItem() throws {
+    let metadata = SimulatorDeviceMetadata(
+        udid: "11111111-1111-4111-8111-111111111111",
+        name: "Custom",
+        deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+        mainGroup: .other,
+        runtimeLabel: "iOS 26.5",
+        isBooted: false,
+        isDeletable: true)
+    let original = CacheItem(
+        categoryID: SimulatorDeviceDataSource.id,
+        url: URL(filePath: "/tmp/cruft-v3/device"),
+        label: "Custom",
+        deletionMode: .simulatorDevice,
+        simulatorMetadata: metadata)
+
+    let decoded = try JSONDecoder().decode(
+        CacheItem.self, from: JSONEncoder().encode(original))
+
+    #expect(decoded == original)
+    #expect(decoded.simulatorMetadata == metadata)
+    #expect(decoded.simulatorMetadata?.hasExactIdentity == true)
+    #expect(decoded.simulatorMetadata?.isEligibleForDeletion == true)
+}
+
+@Test func cacheItemDecodesV3SimulatorMetadataWithoutV4IdentityFacts() throws {
+    let original = CacheItem(
+        categoryID: SimulatorDeviceDataSource.id,
+        url: URL(filePath: "/tmp/cruft-v3/device"),
+        label: "Custom",
+        deletionMode: .simulatorDevice,
+        simulatorMetadata: SimulatorDeviceMetadata(
+            udid: "11111111-1111-4111-8111-111111111111",
+            mainGroup: .other,
+            runtimeLabel: "iOS 26.5",
+            isBooted: false,
+            isDeletable: true))
+
+    let decoded = try JSONDecoder().decode(
+        CacheItem.self, from: JSONEncoder().encode(original))
+
+    #expect(decoded == original)
+    #expect(decoded.simulatorMetadata?.name == nil)
+    #expect(decoded.simulatorMetadata?.deviceTypeIdentifier == nil)
+    #expect(decoded.simulatorMetadata?.runtimeIdentifier == nil)
+    #expect(decoded.simulatorMetadata?.hasExactIdentity == false)
+    #expect(decoded.simulatorMetadata?.isEligibleForDeletion == false)
 }
 
 @Test func scanRootDefaultsToFirstDeletionRootWithoutCreatingOneForViewOnlySources() {

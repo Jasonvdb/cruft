@@ -12,10 +12,11 @@ lumps in things you should never delete. cruft shows the total in your menu
 bar, keeps it fresh in the background without ever making your Mac feel busy,
 and cleans only the safe categories with one confirmed click.
 
-**Only things that can be derived again are ever deleted.** Simulator device
-data is measured for visibility, but it is never cleaned. iOS device support,
-source code, and anything else you cannot get back are off limits by design —
-see [Safety model](#safety-model).
+Re-derivable caches use the normal clean flow. Simulator devices are different:
+they contain installed apps and data that cannot be recovered, so cruft deletes
+them only through an explicit runtime-subgroup action and a red confirmation.
+iOS device support, source code, and unrelated user data remain off limits — see
+[Safety model](#safety-model).
 
 > 🚧 Pre-release: fully functional and heavily tested against fixture
 > trees, but no notarized binary yet — build from source below. A signed
@@ -29,17 +30,27 @@ see [Safety model](#safety-model).
 | Project build folders | `build/`, `.build/`, `.gradle/` next to project markers under your projects root | ✅ rebuilds |
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
-| Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** (never Devices) | ✅ regenerates |
-| Simulator device data | `~/Library/Developer/CoreSimulator/Devices` (per device) | 👁 visibility only — included in totals, never cleaned |
+| Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** | ✅ regenerates |
+| Simulator device data | `~/Library/Developer/CoreSimulator/Devices` (per device) | ⚠️ not re-derivable — grouped by Xcode/Other and runtime; explicit subgroup deletion only |
 | XcodeBuildMCP workspaces | `~/Library/Developer/XcodeBuildMCP/workspaces` | ✅ rebuilds on next MCP build |
 | JS package caches | `~/.npm/_cacache`, Yarn, pnpm caches/store | ✅ re-downloads |
 | Xcode Archives | `~/Library/Developer/Xcode/Archives` | ⚠️ **NOT re-derivable** (release dSYMs) — excluded from Clean All by default, explicit per-category clean with a red warning |
 
-Never deleted: CoreSimulator **Devices**, iOS/watchOS DeviceSupport, Android
-AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper distributions,
-and anything outside your home directory. Simulator device directories appear
-in scan totals, but the row, Clean All, and `cruft-cli clean` cannot delete
-them.
+Simulator devices appear under exactly two headings. **Xcode** contains devices
+whose names match their standard CoreSimulator device type. **Other** contains
+custom names, including Flow-created devices, plus unclassified devices.
+CoreSimulator does not record creator identity, so cruft does not claim that
+every device under Other came from Flow. Each heading is divided into runtime
+groups such as `iOS 26.4`, `iOS 26.5`, and `watchOS 26.5`.
+
+Only a complete runtime subgroup can be deleted. A group is disabled if any
+device is booted, not ready, or has unknown metadata. The simulator parent,
+Xcode/Other headings, Clean All, Settings, and `cruft-cli clean` cannot perform
+bulk simulator deletion.
+
+Never deleted: the CoreSimulator **Devices root**, iOS/watchOS DeviceSupport,
+Android AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper
+distributions, and anything outside your home directory.
 
 ## Safety model
 
@@ -49,22 +60,27 @@ cruft deletes files, so it is engineered like it.
   a single audited type, [`SafeDeleter`](CruftKit/Sources/CruftKit/SafeDeleter.swift).
   A CI check ([`Scripts/check-chokepoint.sh`](Scripts/check-chokepoint.sh))
   fails the build if any other production code acquires a file-removal API.
-- **Eight rules, all must pass**, compared on canonical (symlink-resolved)
-  paths on both sides: inside your home; home-override backstop (only the
-  real `$HOME` or a temp-area test fixture is ever accepted); inside the
-  category's allowed roots; a hard **denylist** (`.git`, `Devices`,
-  `DeviceSupport`, `.avd`, `UserData`, iCloud's `Mobile Documents`) that
-  beats the allowlist; a depth floor; symlinks deleted as links, never
-  followed; must exist and be owned by you; and a dry-run mode that runs
-  every check without touching anything.
+- **Eight generic rules, all must pass**, compared on canonical
+  (symlink-resolved) paths on both sides: inside your home; home-override
+  backstop (only the real `$HOME` or a temp-area test fixture is accepted);
+  inside the category's allowed roots; a hard **denylist** (`.git`, `Devices`,
+  `DeviceSupport`, `.avd`, `UserData`, iCloud's `Mobile Documents`) that beats
+  the allowlist; a depth floor; symlinks deleted as links, never followed; must
+  exist and be owned by you; and a dry-run mode that runs every check without
+  touching anything.
+- **Simulator deletion has a narrower mode.** `Devices` stays denylisted for
+  every generic clean. Simulator mode accepts only one real, direct UUID child
+  of the exact canonical CoreSimulator Devices root. It re-reads `device.plist`,
+  requires matching metadata and shutdown state, then calls
+  `xcrun simctl delete <UDID>` instead of removing the directory directly.
 - **Adversarially tested.** The test suite includes named attack fixtures —
   symlinks escaping home, symlinks into `.git`, mis-cased denylist
   components on case-insensitive APFS, `..` traversal, depth-floor edges —
   plus a conformance suite that pushes every cleanable item through the real
   SafeDeleter in dry-run and verifies that view-only items refuse deletion.
 - **Nothing is deleted without a confirmation dialog**, which shows exactly
-  what will be removed, warns if Xcode or a Gradle daemon is running, and
-  requires a second explicit opt-in for the one non-re-derivable category.
+  what will be removed and warns if Xcode or a Gradle daemon is running.
+  Archives and simulator subgroups show their own red, non-recoverable warning.
 - **Honest numbers.** Freed space is measured as the volume's free-space
   delta (`statfs`), not per-file sums — APFS clones can't inflate it.
 
@@ -74,8 +90,8 @@ Scanning ~100 GB of caches without making your Mac feel slow is most of the
 engineering here:
 
 - Sizing is a **pure metadata walk** — payload file contents are never read.
-  Simulator discovery can read the small `device.plist` directly in a device
-  directory to show its name.
+  Simulator discovery reads the small `device.plist` directly in each device
+  directory to classify its name, runtime, UDID, and current state.
 - Scheduled scans run at background QoS, which gets kernel-throttled disk
   I/O; user-initiated scans never run above utility priority.
 - A **quiet gate** skips scanning DerivedData while a build is actively
@@ -113,9 +129,9 @@ swift run --package-path CruftKit cruft-cli clean --category derived-data --yes 
 
 `clean` is dry-run by default. Deleting from your real home requires an
 extra explicit flag beyond `--yes` (it tells you which). The CLI lists
-`simulator-device-data` in scan totals but always refuses a clean request for
-that category, including dry-run requests. Human scan output marks it as
-`view only`, and JSON output reports `"supportsCleaning": false`.
+`simulator-device-data` in scan totals but refuses a whole-category clean,
+including dry-run requests. Simulator deletion is available only from the
+app's exact Xcode/Other runtime subgroup controls.
 
 ## Extending
 

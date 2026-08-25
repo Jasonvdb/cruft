@@ -1,7 +1,7 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v2) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v4) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
 // =============================================================================
@@ -65,6 +65,72 @@ public struct ScanContext: Sendable {
 public enum DeletionMode: String, Sendable, Codable {
     case entireItem
     case contentsOnly
+    /// A registered CoreSimulator device. SafeDeleter validates the exact
+    /// UUID directory and uses `simctl delete` for a real-home live clean.
+    case simulatorDevice
+}
+
+/// Typed simulator facts retained with a discovered item. CoreSimulator does
+/// not record which tool created a device. `other` therefore means a custom
+/// name, which can include Flow-created devices, but is not proof of origin.
+public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
+    public enum MainGroup: String, Sendable, Hashable, Codable {
+        case xcode
+        case other
+        case unknown
+    }
+
+    public let udid: String
+    /// Optional only so snapshots written before contracts v4 still decode.
+    /// New simulator discoveries always retain all three exact values.
+    public let name: String?
+    public let deviceTypeIdentifier: String?
+    public let runtimeIdentifier: String?
+    public let mainGroup: MainGroup
+    public let runtimeLabel: String
+    public let isBooted: Bool
+    public let isDeletable: Bool
+
+    public init(
+        udid: String,
+        name: String? = nil,
+        deviceTypeIdentifier: String? = nil,
+        runtimeIdentifier: String? = nil,
+        mainGroup: MainGroup,
+        runtimeLabel: String,
+        isBooted: Bool,
+        isDeletable: Bool
+    ) {
+        self.udid = udid
+        self.name = name
+        self.deviceTypeIdentifier = deviceTypeIdentifier
+        self.runtimeIdentifier = runtimeIdentifier
+        self.mainGroup = mainGroup
+        self.runtimeLabel = runtimeLabel
+        self.isBooted = isBooted
+        self.isDeletable = isDeletable
+    }
+
+    public var hasKnownClassification: Bool {
+        mainGroup != .unknown && !runtimeLabel.isEmpty && runtimeLabel != "Unknown"
+    }
+
+    /// Exact discovery-time identity required for delete-time equality checks.
+    /// Older snapshots decode with nil values and remain visible, but they
+    /// cannot be deleted until a fresh scan supplies all three facts.
+    public var hasExactIdentity: Bool {
+        guard let name, let deviceTypeIdentifier, let runtimeIdentifier else {
+            return false
+        }
+        return !name.isEmpty && !deviceTypeIdentifier.isEmpty && !runtimeIdentifier.isEmpty
+    }
+
+    /// The shared subgroup, planner, source, and deletion-seam eligibility
+    /// rule. SafeDeleter still re-reads device.plist immediately before a
+    /// deletion because these retained scan facts can become stale.
+    public var isEligibleForDeletion: Bool {
+        hasExactIdentity && hasKnownClassification && !isBooted && isDeletable
+    }
 }
 
 /// One cleanable thing on disk, discovered by a `CacheSource`. Identity is
@@ -76,12 +142,22 @@ public struct CacheItem: Identifiable, Sendable, Hashable, Codable {
     public let url: URL
     public let label: String
     public let deletionMode: DeletionMode
+    /// Present only for simulator-device items. Optional preserves decoding of
+    /// v2 persisted snapshots that predate typed simulator metadata.
+    public let simulatorMetadata: SimulatorDeviceMetadata?
 
-    public init(categoryID: CategoryID, url: URL, label: String, deletionMode: DeletionMode = .entireItem) {
+    public init(
+        categoryID: CategoryID,
+        url: URL,
+        label: String,
+        deletionMode: DeletionMode = .entireItem,
+        simulatorMetadata: SimulatorDeviceMetadata? = nil
+    ) {
         self.categoryID = categoryID
         self.url = url
         self.label = label
         self.deletionMode = deletionMode
+        self.simulatorMetadata = simulatorMetadata
         self.id = "\(categoryID.rawValue):\(url.path(percentEncoded: false))"
     }
 }
@@ -220,6 +296,12 @@ public protocol CacheSource: Sendable {
     /// `false` means the category can be scanned and measured, but no clean
     /// path may delete its items.
     var supportsCleaning: Bool { get }
+    /// `false` requires an explicit measured-item subset. This prevents broad
+    /// category, Clean All, and CLI clean operations while preserving a safe
+    /// per-subgroup clean path.
+    var allowsWholeCategoryCleaning: Bool { get }
+    /// Source-specific warning for data that cannot be re-derived.
+    var destructiveWarning: String? { get }
     /// Root used for scan safety gates and discovery. This is separate from
     /// deletion roots so a view-only source can declare what it measures
     /// without making that path eligible for deletion.
@@ -231,6 +313,8 @@ public protocol CacheSource: Sendable {
     /// Deletes one discovered item through the deleter seam.
     @discardableResult
     func clean(item: CacheItem, context: ScanContext, using deleter: any ItemDeleting) async throws -> [URL]
+    /// Whether one exact discovered item is eligible for deletion.
+    func canClean(item: CacheItem) -> Bool
 }
 
 public extension CacheSource {
@@ -238,6 +322,12 @@ public extension CacheSource {
     var includedInCleanAllByDefault: Bool { true }
     var isDestructive: Bool { false }
     var supportsCleaning: Bool { true }
+    var allowsWholeCategoryCleaning: Bool { supportsCleaning }
+    var destructiveWarning: String? { nil }
+
+    func canClean(item: CacheItem) -> Bool {
+        supportsCleaning && item.categoryID == id
+    }
 
     /// Existing cleanable sources scan their first deletion root. Sources
     /// with a different discovery boundary must override this method.
@@ -250,6 +340,9 @@ public extension CacheSource {
         guard supportsCleaning else {
             throw CacheSourceError.cleaningUnsupported(id)
         }
+        guard canClean(item: item) else {
+            throw CacheSourceError.itemCleaningUnsupported(id, item.id)
+        }
         return try await deleter.delete(
             DeletionRequest(item: item, allowedRoots: allowedDeletionRoots(context: context))
         )
@@ -260,4 +353,5 @@ public extension CacheSource {
 /// planner, UI, or CLI capability checks.
 public enum CacheSourceError: Error, Sendable, Equatable {
     case cleaningUnsupported(CategoryID)
+    case itemCleaningUnsupported(CategoryID, String)
 }

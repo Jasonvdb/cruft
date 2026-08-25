@@ -162,6 +162,12 @@ final class AppModel {
         return Self.formattedBytes(menuState.displayedTotalBytes)
     }
 
+    /// Pure, presentation-ready simulator grouping. Persisted snapshots from
+    /// before simulator metadata existed remain visible under Other / Unknown.
+    var simulatorHierarchy: SimulatorHierarchy {
+        SimulatorHierarchy(snapshot: latestSnapshots[SimulatorDeviceDataSource.id])
+    }
+
     /// The EFFECTIVE projects root (the context's, after defaulting) — what
     /// the Settings window displays.
     var projectsRootDisplayPath: String {
@@ -335,8 +341,8 @@ final class AppModel {
 
     /// Builds a one-category plan and publishes the confirmation dialog
     /// (empty plan → transient "nothing to clean", no dialog). Per-category
-    /// clean is always available — including the destructive Archives,
-    /// whose plan carries the prominent destructive warning.
+    /// clean is available for sources that allow whole-category cleaning,
+    /// including Archives. Simulator deletion uses an explicit subgroup path.
     func requestClean(category: CategoryID) {
         guard pendingPlan == nil, !isCleaning else { return }
         let planner = CleanPlanner(sources: sources)
@@ -355,6 +361,39 @@ final class AppModel {
         let displayName = sources.first { $0.id == category }?.displayName ?? category.rawValue
         pendingPlan = makeConfirmation(
             title: "Clean \(displayName)", plan: plan, processWarnings: processWarnings)
+    }
+
+    /// Builds a plan for one exact simulator runtime subgroup. The whole group
+    /// must be eligible; a partial plan is refused instead of silently deleting
+    /// only the devices that passed the source check.
+    func requestDeleteSimulatorGroup(_ group: SimulatorHierarchy.RuntimeGroup) {
+        guard pendingPlan == nil, !isCleaning,
+            group.isDeletable
+        else {
+            noteNothingToClean()
+            return
+        }
+        let category = SimulatorDeviceDataSource.id
+        let processWarnings = ProcessGuard().warnings(for: [category])
+        let plan = CleanPlanner(sources: sources).planSubset(
+            category,
+            measuredItems: group.measuredItems,
+            processWarnings: processWarnings)
+        guard plan.itemsByCategory[category]?.count == group.deviceCount else {
+            noteNothingToClean()
+            return
+        }
+        let groupName = "\(group.mainGroup.displayName) · \(group.runtimeLabel)"
+        let entry = PendingCleanConfirmation.Entry(
+            id: category,
+            displayName: groupName,
+            itemCount: group.deviceCount,
+            bytes: group.allocatedBytes)
+        pendingPlan = makeConfirmation(
+            title: "Delete \(groupName) Simulators",
+            plan: plan,
+            processWarnings: processWarnings,
+            entries: [entry])
     }
 
     /// Clean All membership comes from the planner's defaults plus the
@@ -410,48 +449,117 @@ final class AppModel {
         var perCategory: [CleanResult.CategoryResult] = []
         var errorMessage: String?
         // Registry order, matching the menu rows.
-        categories: for source in sources {
+        for source in sources {
             guard var remaining = plan.itemsByCategory[source.id] else { continue }
-            var categoryDeleted = 0
+            var categoryFreedBytes: Int64 = 0
+            var confirmedDeletedPaths: [String] = []
+            var confirmedDeletedPathSet: Set<String> = []
+            var categoryCompleted = false
+            var categoryFailure: (any Error)?
+
+            func record(_ outcome: CleanOutcome) {
+                let newPaths = outcome.deletedPaths.filter { path in
+                    confirmedDeletedPathSet.insert(Self.normalizedPath(path)).inserted
+                }
+                guard !newPaths.isEmpty else { return }
+                confirmedDeletedPaths.append(contentsOf: newPaths)
+                categoryFreedBytes += outcome.freedBytes
+            }
+
             // An item can vanish between the dialog opening and now (an
             // external `rm`, Xcode's own cleanup). SafeDeleter reports that
             // as `.doesNotExist`; drop JUST that item and retry the rest —
             // everything else was still consented to. Any other error
-            // aborts the whole run, as before. Bounded: each retry removes
-            // one vanished `.entireItem` (or re-lists a `.contentsOnly`
-            // root, which then skips its vanished child).
+            // aborts the whole run, as before. Each retry must remove an
+            // exact remaining plan item; a mismatched path or exhausted
+            // budget is an explicit error, never an apparent success.
             var retriesLeft = remaining.count + 3
             while !remaining.isEmpty, retriesLeft > 0 {
                 retriesLeft -= 1
                 do {
                     let outcome = try await engine.clean(category: source.id, items: remaining)
-                    freedBytes += outcome.freedBytes
-                    categoryDeleted += outcome.deletedPaths.count
+                    record(outcome)
                     remaining = []
+                    categoryCompleted = true
+                } catch let partial as PartialCleanFailure {
+                    // ScanEngine has already persisted these exact successes.
+                    // Count them before routing the underlying failure, and
+                    // never submit their source items again on a retry.
+                    record(partial.outcome)
+                    let completedItemIDs = Set(partial.completedItemIDs)
+                    remaining.removeAll { completedItemIDs.contains($0.id) }
+
+                    if let path = Self.doesNotExistPath(from: partial.underlyingError) {
+                        do {
+                            remaining = try CleanRetryPolicy.removingMissingItem(
+                                at: path,
+                                from: remaining)
+                            categoryCompleted = remaining.isEmpty
+                        } catch {
+                            categoryFailure = error
+                            break
+                        }
+                    } else {
+                        categoryFailure = partial.underlyingError
+                        break
+                    }
                 } catch SafeDeleterError.doesNotExist(let path) {
-                    let vanished = Self.normalizedPath(path)
-                    remaining.removeAll {
-                        Self.normalizedPath($0.url.path(percentEncoded: false)) == vanished
+                    do {
+                        remaining = try CleanRetryPolicy.removingMissingItem(
+                            at: path,
+                            from: remaining)
+                        categoryCompleted = remaining.isEmpty
+                    } catch {
+                        categoryFailure = error
+                        break
                     }
                 } catch {
                     // Stop on any real error: already-cleaned categories
                     // stay cleaned, the message reaches the result line,
                     // never crash. (The engine's error path still enqueues
                     // a `.postClean` rescan, so the display self-corrects.)
-                    errorMessage = String(describing: error)
-                    break categories
+                    categoryFailure = error
+                    break
                 }
             }
+            if categoryFailure == nil,
+                let terminalError = CleanRetryPolicy.terminalError(
+                    remainingItems: remaining)
+            {
+                categoryFailure = terminalError
+            }
+            let categoryDeleted = confirmedDeletedPaths.count
+            freedBytes += categoryFreedBytes
             deletedItems += categoryDeleted
             perCategory.append(CleanResult.CategoryResult(
                 id: source.id,
                 displayName: source.displayName,
                 deletedItems: categoryDeleted))
-            // The retained number is no longer truthful: drop it and let
-            // the engine's automatic `.postClean` rescan repaint from
-            // zero (MenuState.noteCleaned owns that rule).
-            latestSnapshots[source.id] = nil
-            menuState.noteCleaned(source.id)
+
+            if source.id == SimulatorDeviceDataSource.id {
+                // Simulator plans are always exact subsets. Keep every
+                // untouched measured device visible while the automatic
+                // post-clean scan validates the retained remainder.
+                if !confirmedDeletedPaths.isEmpty,
+                    let snapshot = latestSnapshots[source.id]
+                {
+                    let remainder = SimulatorHierarchy.remainingSnapshot(
+                        from: snapshot,
+                        deletingPaths: confirmedDeletedPaths)
+                    latestSnapshots[source.id] = remainder
+                    menuState.noteCleaned(source.id, retaining: remainder)
+                }
+            } else if categoryCompleted || !confirmedDeletedPaths.isEmpty {
+                // Whole-category sources, including `.contentsOnly` roots,
+                // keep their existing repaint-from-zero behavior.
+                latestSnapshots[source.id] = nil
+                menuState.noteCleaned(source.id)
+            }
+
+            if let categoryFailure {
+                errorMessage = String(describing: categoryFailure)
+                break
+            }
         }
         lastCleanResult = CleanResult(
             freedBytes: freedBytes,
@@ -472,10 +580,23 @@ final class AppModel {
         return path
     }
 
+    private static func doesNotExistPath(from error: any Error) -> String? {
+        guard let deleterError = error as? SafeDeleterError,
+            case .doesNotExist(let path) = deleterError
+        else {
+            return nil
+        }
+        return path
+    }
+
     private func makeConfirmation(
-        title: String, plan: CleanPlan, processWarnings: [String]
+        title: String,
+        plan: CleanPlan,
+        processWarnings: [String],
+        entries suppliedEntries: [PendingCleanConfirmation.Entry]? = nil
     ) -> PendingCleanConfirmation {
-        let entries = sources.compactMap { source -> PendingCleanConfirmation.Entry? in
+        let entries = suppliedEntries ?? sources.compactMap {
+            source -> PendingCleanConfirmation.Entry? in
             guard let items = plan.itemsByCategory[source.id] else { return nil }
             return PendingCleanConfirmation.Entry(
                 id: source.id,
@@ -483,10 +604,13 @@ final class AppModel {
                 itemCount: items.count,
                 bytes: latestSnapshots[source.id]?.totalBytes ?? 0)
         }
-        // Built from source flags, not by matching warning strings: any
-        // destructive category in the plan carries the planner's warning.
-        let hasDestructive = sources.contains {
-            $0.isDestructive && plan.itemsByCategory[$0.id] != nil
+        // Built from source metadata, not warning-text matching. Each
+        // destructive source supplies its own exact warning.
+        let destructiveWarnings = sources.compactMap { source -> String? in
+            guard source.isDestructive, plan.itemsByCategory[source.id] != nil else {
+                return nil
+            }
+            return source.destructiveWarning
         }
         return PendingCleanConfirmation(
             title: title,
@@ -494,7 +618,7 @@ final class AppModel {
             totalItemCount: entries.reduce(0) { $0 + $1.itemCount },
             estimatedBytes: plan.estimatedBytes,
             processWarnings: processWarnings,
-            destructiveWarnings: hasDestructive ? [CleanPlanner.destructiveWarning] : [],
+            destructiveWarnings: destructiveWarnings,
             plan: plan)
     }
 
