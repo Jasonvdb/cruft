@@ -184,6 +184,135 @@ struct SimulatorDeviceHierarchyView: View {
     }
 }
 
+/// Collapsed-by-default item list for age-gated cleanup sources. Age only
+/// enables the confirmation path. SafeDeleter still performs the live
+/// open-file, process, signature, and Git checks after confirmation.
+struct GuardedCleanupListView: View {
+    let list: GuardedCleanupList
+    let cleanDisabled: Bool
+    let onDelete: (GuardedCleanupList.Row) -> Void
+
+    @State private var isExpanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(list.rows) { row in
+                    GuardedCleanupItemRow(
+                        row: row,
+                        cleanDisabled: cleanDisabled,
+                        onDelete: { onDelete(row) })
+                }
+            }
+            .padding(.top, 4)
+            .padding(.leading, 12)
+        } label: {
+            Text(reviewLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.leading, 12)
+    }
+
+    private var reviewLabel: String {
+        let count = list.rows.count
+        return "Review \(count) \(count == 1 ? "item" : "items")"
+    }
+}
+
+private struct GuardedCleanupItemRow: View {
+    let row: GuardedCleanupList.Row
+    let cleanDisabled: Bool
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(row.label)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let reason = row.blockingReasons.first {
+                badge(badgeText(reason), color: badgeColor(reason))
+                    .help(helpText(reason))
+            } else {
+                badge("72h+", color: .secondary)
+                    .help("No metadata change was found in the last 72 hours. Live use is checked before deletion.")
+            }
+            Spacer(minLength: 8)
+            Text(AppModel.formattedBytes(row.allocatedBytes))
+                .monospacedDigit()
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(cleanDisabled || !row.isDeletable)
+            .opacity(isHovering && row.isDeletable ? 1 : 0)
+            .accessibilityLabel("Delete \(row.label)")
+            .help(actionHelp)
+        }
+        .font(.caption)
+        .contentShape(Rectangle())
+        .help(row.url.path(percentEncoded: false))
+        .onHover { isHovering = $0 }
+    }
+
+    private var actionHelp: String {
+        if cleanDisabled { return "Wait for the current deletion to finish." }
+        if let reason = row.blockingReasons.first { return helpText(reason) }
+        return "Delete after a live active-use safety check…"
+    }
+
+    private func badgeText(_ reason: GuardedCleanupList.BlockingReason) -> String {
+        switch reason {
+        case .recent: "recent"
+        case .ageUnknown: "age unknown"
+        case .measurementIncomplete: "scan incomplete"
+        case .worktreeMetadataUnknown: "Git unknown"
+        case .dirty: "dirty"
+        case .locked: "locked"
+        case .notContainedInPrimaryBranch: "not merged"
+        }
+    }
+
+    private func badgeColor(_ reason: GuardedCleanupList.BlockingReason) -> Color {
+        switch reason {
+        case .dirty, .notContainedInPrimaryBranch: .orange
+        case .recent, .ageUnknown, .measurementIncomplete,
+                .worktreeMetadataUnknown, .locked: .secondary
+        }
+    }
+
+    private func helpText(_ reason: GuardedCleanupList.BlockingReason) -> String {
+        switch reason {
+        case .recent:
+            "Delete is unavailable because this item changed within the last 72 hours."
+        case .ageUnknown:
+            "Delete is unavailable because Cruft could not verify the newest change time."
+        case .measurementIncomplete:
+            "Delete is unavailable because part of the directory could not be measured."
+        case .worktreeMetadataUnknown:
+            "Delete is unavailable because local Git metadata is incomplete."
+        case .dirty:
+            "Delete is unavailable because the worktree has uncommitted or untracked files."
+        case .locked:
+            "Delete is unavailable because Git marks the worktree as locked."
+        case .notContainedInPrimaryBranch:
+            "Delete is unavailable because the worktree commit is not contained in the local primary branch."
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(color)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(.quaternary, in: Capsule())
+    }
+}
+
 private struct SimulatorRuntimeRowView: View {
     let group: SimulatorHierarchy.RuntimeGroup
     let cleanDisabled: Bool

@@ -97,22 +97,26 @@ private let decoyPaths = [
     #expect(snapshots.count == allIDs.count)
 
     // Clean All plan with empty user include/exclude (settings are Phase 6):
-    // the destructive Archives category and subgroup-only simulator data must
-    // stay out.
+    // destructive default-out and explicit-item categories must stay out.
     let archives = CategoryID("xcode-archives")
     let simulatorData = CategoryID("simulator-device-data")
     let plan = CleanPlanner(sources: SourceRegistry.allSources).planCleanAll(snapshots: snapshots)
     #expect(!plan.itemsByCategory.keys.contains(archives))
     #expect(!plan.itemsByCategory.keys.contains(simulatorData))
-    #expect(Set(plan.itemsByCategory.keys) == Set(allIDs).subtracting([archives, simulatorData]))
+    let expectedPlanIDs = Set(SourceRegistry.allSources.filter {
+        $0.supportsCleaning && $0.allowsWholeCategoryCleaning
+            && !$0.isDestructive && $0.includedInCleanAllByDefault
+    }.map(\.id))
+    #expect(Set(plan.itemsByCategory.keys) == expectedPlanIDs)
     #expect(plan.estimatedBytes > 0)
 
     // MenuState mirrors the GUI: painted from the scanned snapshots.
     var menuState = MenuState(sources: SourceRegistry.allSources, persisted: snapshots)
-    let archivesBytes = try #require(snapshots.first { $0.categoryID == archives }).totalBytes
+    let protectedBytes = snapshots
+        .filter { !expectedPlanIDs.contains($0.categoryID) }
+        .reduce(0) { $0 + $1.totalBytes }
     let simulatorBytes = try #require(
         snapshots.first { $0.categoryID == simulatorData }).totalBytes
-    let protectedBytes = archivesBytes + simulatorBytes
     #expect(simulatorBytes > 0)
     #expect(menuState.displayedTotalBytes > protectedBytes)
 
@@ -143,8 +147,8 @@ private let decoyPaths = [
                     "\(id): root \(path) must survive a contentsOnly clean")
                 let children = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
                 #expect(children.isEmpty, "\(id): \(path) should be emptied, found \(children)")
-            case .simulatorDevice:
-                Issue.record("simulator devices must not enter Clean All")
+            case .simulatorDevice, .temporaryDerivedData, .agentWorktree:
+                Issue.record("explicit-item categories must not enter Clean All")
             }
         }
     }

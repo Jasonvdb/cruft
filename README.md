@@ -5,7 +5,7 @@ and cleans it safely.
 
 <img src="docs/screenshot.png" width="360" alt="cruft menu bar popover showing 113.94 GB of developer storage across Xcode DerivedData, simulator device data, project build folders, Gradle, SwiftPM, Xcode and JS package caches, with per-category sizes and a Clean All button">
 
-Xcode DerivedData, simulator device data, stray in-repo `build/` folders,
+Xcode DerivedData, temporary DerivedData, agent worktrees, simulator device data, stray in-repo `build/` folders,
 Gradle caches, SwiftPM, and npm/yarn/pnpm caches can quietly grow to **tens or
 hundreds of GB**. The built-in macOS storage pane is slow, incomplete, and
 lumps in things you should never delete. cruft shows the total in your menu
@@ -27,7 +27,9 @@ iOS device support, source code, and unrelated user data remain off limits — s
 | Category | Location | Re-derivable? |
 |---|---|---|
 | Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData` (per-project) | ✅ rebuilds on next build |
+| Temporary DerivedData | direct Xcode-shaped `*DerivedData*` folders under `/private/tmp` | ✅ rebuilds; explicit item deletion only after 72 h without changes and a live-use check |
 | Project build folders | `build/`, `.build/`, `.gradle/` next to project markers under your projects root | ✅ rebuilds |
+| Claude & Codex worktrees | direct children of `.claude/worktrees` and `.codex/worktrees` under each repository | ⚠️ explicit item deletion only; clean, unlocked, contained in the local primary branch, unchanged for 72 h, and not active |
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
 | Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** | ✅ regenerates |
@@ -48,7 +50,20 @@ device is booted, not ready, or has unknown metadata. The simulator parent,
 Xcode/Other headings, Clean All, Settings, and `cruft-cli clean` cannot perform
 bulk simulator deletion.
 
-Never deleted: the CoreSimulator **Devices root**, iOS/watchOS DeviceSupport,
+Temporary DerivedData and agent worktrees are also never part of Clean All.
+Each directory has its own action. The action stays disabled until a complete
+metadata scan shows no change for at least 72 hours. Immediately before
+deletion, cruft scans the age again and refuses any directory with an open file,
+process working directory, or process command line that refers to it.
+
+Worktrees have additional local Git checks. They must be registered, clean,
+unlocked, and fully contained in `main`, `master`, the local origin default, or
+`develop` (in that order). Cruft then runs `git worktree remove` without
+`--force`, so Git performs a final dirty and lock check. No remote or pull
+request service is contacted.
+
+Never deleted: `/private/tmp` itself, any `.claude/worktrees` or
+`.codex/worktrees` root, the CoreSimulator **Devices root**, iOS/watchOS DeviceSupport,
 Android AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper
 distributions, and anything outside your home directory.
 
@@ -73,6 +88,11 @@ cruft deletes files, so it is engineered like it.
   of the exact canonical CoreSimulator Devices root. It re-reads `device.plist`,
   requires matching metadata and shutdown state, then calls
   `xcrun simctl delete <UDID>` instead of removing the directory directly.
+- **Temporary and worktree deletion have guarded modes.** Temporary items must
+  be direct `/private/tmp` children with an Xcode `Build` signature. Worktrees
+  must be direct registered Claude/Codex children with safe local Git state.
+  Both modes require a complete 72-hour age measurement and a live-use check
+  at the deletion choke point. Worktrees are removed by Git without force.
 - **Adversarially tested.** The test suite includes named attack fixtures —
   symlinks escaping home, symlinks into `.git`, mis-cased denylist
   components on case-insensitive APFS, `..` traversal, depth-floor edges —
@@ -129,9 +149,10 @@ swift run --package-path CruftKit cruft-cli clean --category derived-data --yes 
 
 `clean` is dry-run by default. Deleting from your real home requires an
 extra explicit flag beyond `--yes` (it tells you which). The CLI lists
-`simulator-device-data` in scan totals but refuses a whole-category clean,
-including dry-run requests. Simulator deletion is available only from the
-app's exact Xcode/Other runtime subgroup controls.
+simulator data, temporary DerivedData, and agent worktrees in scan totals but
+refuses whole-category cleanup for them, including dry-run requests. Their
+deletion actions are available only from the app's exact subgroup or item
+controls.
 
 ## Extending
 

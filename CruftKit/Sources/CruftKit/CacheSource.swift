@@ -1,7 +1,7 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v4) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v5) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
 // =============================================================================
@@ -68,6 +68,13 @@ public enum DeletionMode: String, Sendable, Codable {
     /// A registered CoreSimulator device. SafeDeleter validates the exact
     /// UUID directory and uses `simctl delete` for a real-home live clean.
     case simulatorDevice
+    /// One direct Xcode DerivedData directory under /private/tmp. The
+    /// deletion choke point rechecks its signature, age, and active use.
+    case temporaryDerivedData
+    /// One registered Claude/Codex Git worktree. The deletion choke point
+    /// rechecks Git state, age, and active use, then asks Git to remove it
+    /// without force.
+    case agentWorktree
 }
 
 /// Typed simulator facts retained with a discovered item. CoreSimulator does
@@ -133,6 +140,60 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
     }
 }
 
+/// Typed Git facts retained with a Claude/Codex worktree item. Discovery
+/// gathers these from local Git state only. SafeDeleter obtains them again
+/// immediately before deletion and requires an exact safe match.
+public struct AgentWorktreeMetadata: Sendable, Hashable, Codable {
+    public enum Agent: String, Sendable, Hashable, Codable {
+        case claude
+        case codex
+
+        public var displayName: String {
+            switch self {
+            case .claude: "Claude"
+            case .codex: "Codex"
+            }
+        }
+    }
+
+    public let agent: Agent
+    public let repositoryRoot: URL
+    public let headRevision: String
+    public let branchName: String?
+    public let primaryReference: String?
+    public let isRegistered: Bool
+    public let isClean: Bool
+    public let isLocked: Bool
+    public let isContainedInPrimaryBranch: Bool
+
+    public init(
+        agent: Agent,
+        repositoryRoot: URL,
+        headRevision: String,
+        branchName: String? = nil,
+        primaryReference: String? = nil,
+        isRegistered: Bool,
+        isClean: Bool,
+        isLocked: Bool,
+        isContainedInPrimaryBranch: Bool
+    ) {
+        self.agent = agent
+        self.repositoryRoot = repositoryRoot
+        self.headRevision = headRevision
+        self.branchName = branchName
+        self.primaryReference = primaryReference
+        self.isRegistered = isRegistered
+        self.isClean = isClean
+        self.isLocked = isLocked
+        self.isContainedInPrimaryBranch = isContainedInPrimaryBranch
+    }
+
+    public var isEligibleForDeletion: Bool {
+        isRegistered && isClean && !isLocked && isContainedInPrimaryBranch
+            && !headRevision.isEmpty && primaryReference != nil
+    }
+}
+
 /// One cleanable thing on disk, discovered by a `CacheSource`. Identity is
 /// the category plus the absolute path — never the display label (six repos
 /// on the reference machine have an item literally named "build").
@@ -145,19 +206,24 @@ public struct CacheItem: Identifiable, Sendable, Hashable, Codable {
     /// Present only for simulator-device items. Optional preserves decoding of
     /// v2 persisted snapshots that predate typed simulator metadata.
     public let simulatorMetadata: SimulatorDeviceMetadata?
+    /// Present only for Claude/Codex worktrees. Optional preserves decoding
+    /// of snapshots written before contracts v5.
+    public let agentWorktreeMetadata: AgentWorktreeMetadata?
 
     public init(
         categoryID: CategoryID,
         url: URL,
         label: String,
         deletionMode: DeletionMode = .entireItem,
-        simulatorMetadata: SimulatorDeviceMetadata? = nil
+        simulatorMetadata: SimulatorDeviceMetadata? = nil,
+        agentWorktreeMetadata: AgentWorktreeMetadata? = nil
     ) {
         self.categoryID = categoryID
         self.url = url
         self.label = label
         self.deletionMode = deletionMode
         self.simulatorMetadata = simulatorMetadata
+        self.agentWorktreeMetadata = agentWorktreeMetadata
         self.id = "\(categoryID.rawValue):\(url.path(percentEncoded: false))"
     }
 }
@@ -172,11 +238,20 @@ public struct ItemSize: Sendable, Hashable, Codable {
     /// (ENOENT/EACCES on individual entries). A nonzero value marks the
     /// measurement approximate; a root-level failure throws instead.
     public var erroredEntries: Int
+    /// Newest metadata modification found anywhere in the measured tree,
+    /// including directories. Optional keeps older persisted snapshots valid.
+    public var newestModificationDate: Date?
 
-    public init(allocatedBytes: Int64 = 0, fileCount: Int = 0, erroredEntries: Int = 0) {
+    public init(
+        allocatedBytes: Int64 = 0,
+        fileCount: Int = 0,
+        erroredEntries: Int = 0,
+        newestModificationDate: Date? = nil
+    ) {
         self.allocatedBytes = allocatedBytes
         self.fileCount = fileCount
         self.erroredEntries = erroredEntries
+        self.newestModificationDate = newestModificationDate
     }
 }
 
@@ -302,6 +377,10 @@ public protocol CacheSource: Sendable {
     var allowsWholeCategoryCleaning: Bool { get }
     /// Source-specific warning for data that cannot be re-derived.
     var destructiveWarning: String? { get }
+    /// Whether a scheduled scan should defer when the broad scan root was
+    /// modified recently. Sources with broad roots and per-item age checks
+    /// disable this so unrelated activity does not suppress discovery.
+    var defersScheduledScanForRecentRootActivity: Bool { get }
     /// Root used for scan safety gates and discovery. This is separate from
     /// deletion roots so a view-only source can declare what it measures
     /// without making that path eligible for deletion.
@@ -315,6 +394,9 @@ public protocol CacheSource: Sendable {
     func clean(item: CacheItem, context: ScanContext, using deleter: any ItemDeleting) async throws -> [URL]
     /// Whether one exact discovered item is eligible for deletion.
     func canClean(item: CacheItem) -> Bool
+    /// Whether one exact measured item is eligible for an explicit subset
+    /// plan. Age-gated sources use the measurement's newest modification.
+    func canClean(measuredItem: MeasuredItem) -> Bool
 }
 
 public extension CacheSource {
@@ -324,9 +406,14 @@ public extension CacheSource {
     var supportsCleaning: Bool { true }
     var allowsWholeCategoryCleaning: Bool { supportsCleaning }
     var destructiveWarning: String? { nil }
+    var defersScheduledScanForRecentRootActivity: Bool { true }
 
     func canClean(item: CacheItem) -> Bool {
         supportsCleaning && item.categoryID == id
+    }
+
+    func canClean(measuredItem: MeasuredItem) -> Bool {
+        canClean(item: measuredItem.item)
     }
 
     /// Existing cleanable sources scan their first deletion root. Sources

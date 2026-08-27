@@ -138,13 +138,13 @@ private func canonicalPath(_ url: URL) -> String {
         }
     }
     // A sudden drop means discovery or a safety contract silently broke.
-    let expectedCleanableTotal = SourceRegistry.allSources
-        .filter { $0.supportsCleaning && $0.allowsWholeCategoryCleaning }
-        .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
+    let expectedTotal = SourceRegistry.allSources.reduce(0) {
+        $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0)
+    }
     let expectedViewOnlyTotal = SourceRegistry.allSources
         .filter { !$0.supportsCleaning }
         .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
-    #expect(validatedItems == expectedCleanableTotal)
+    #expect(validatedItems == expectedTotal - expectedViewOnlyTotal - refusedIneligibleItems)
     #expect(refusedViewOnlyItems == expectedViewOnlyTotal)
     #expect(refusedIneligibleItems == FixtureHome.canonicalExpectedItemCounts["simulator-device-data"])
 }

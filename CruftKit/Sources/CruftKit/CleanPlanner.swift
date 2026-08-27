@@ -104,7 +104,7 @@ public struct CleanPlanner: Sendable {
             return CleanPlan(itemsByCategory: [:], estimatedBytes: 0, warnings: [])
         }
         let accepted = measuredItems.filter {
-            $0.item.categoryID == category && source.canClean(item: $0.item)
+            $0.item.categoryID == category && source.canClean(measuredItem: $0)
         }
         guard !accepted.isEmpty else {
             return CleanPlan(itemsByCategory: [:], estimatedBytes: 0, warnings: [])

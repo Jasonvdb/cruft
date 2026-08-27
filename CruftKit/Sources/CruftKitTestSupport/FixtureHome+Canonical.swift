@@ -21,6 +21,9 @@ extension FixtureHome {
         try plantDerivedDataSharedCache("ModuleCache.noindex")
         _ = try plantDerivedDataDecoys()
 
+        // temporary-derived-data: one old, Xcode-shaped direct temp item.
+        _ = try plantTemporaryDerivedDataFixture()
+
         // in-repo-build: one Xcode project, one SwiftPM project, one
         // android layout (4 items: build, .build, android/.gradle via
         // android project, android/app/build)
@@ -75,7 +78,9 @@ extension FixtureHome {
     /// tests and the Phase 3 gate.
     public static let canonicalExpectedItemCounts: [String: Int] = [
         "derived-data": 3,
+        "temporary-derived-data": 1,
         "in-repo-build": 4,
+        "agent-worktrees": 0,
         "cargo-target": 2,
         "gradle": 2,
         "swiftpm-cache": 1,

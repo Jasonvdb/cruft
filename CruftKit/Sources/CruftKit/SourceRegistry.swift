@@ -6,7 +6,9 @@ public enum SourceRegistry {
     public static var allSources: [any CacheSource] {
         [
             DerivedDataSource(),
+            TemporaryDerivedDataSource(),
             InRepoBuildSource(),
+            AgentWorktreeSource(),
             CargoSource(),
             GradleSource(),
             SwiftPMCacheSource(),

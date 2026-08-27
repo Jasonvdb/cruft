@@ -224,15 +224,25 @@ private func makeFakeEngine(
     let finished = finishedSnapshots(events)
     #expect(finished.count == allIDs.count)
     for (id, snapshot) in finished {
-        #expect(snapshot.totalBytes > 0, "\(id) finished with zero bytes")
+        let expectedCount = FixtureHome.canonicalExpectedItemCounts[id.rawValue] ?? 0
+        if expectedCount > 0 {
+            #expect(snapshot.totalBytes > 0, "\(id) finished with zero bytes")
+        } else {
+            #expect(snapshot.totalBytes == 0, "\(id) should have no fixture bytes")
+        }
         #expect(snapshot.updatedAt != nil, "\(id) finished without updatedAt")
-        #expect(snapshot.items.count == FixtureHome.canonicalExpectedItemCounts[id.rawValue])
+        #expect(snapshot.items.count == expectedCount)
     }
 
     await store.flush()
     let persisted = await StatsStore(fileURL: fixture.url("stats.json")).load()
     #expect(Set(persisted.map(\.categoryID)) == Set(allIDs))
-    #expect(persisted.allSatisfy { $0.totalBytes > 0 && $0.updatedAt != nil })
+    #expect(persisted.allSatisfy { snapshot in
+        let expectedCount = FixtureHome.canonicalExpectedItemCounts[
+            snapshot.categoryID.rawValue] ?? 0
+        return snapshot.updatedAt != nil
+            && (expectedCount == 0 ? snapshot.totalBytes == 0 : snapshot.totalBytes > 0)
+    })
 }
 
 // MARK: - Dedup and postClean

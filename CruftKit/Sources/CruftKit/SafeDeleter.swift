@@ -27,6 +27,20 @@ public enum SafeDeleterError: Error, Equatable {
     case simulatorBooted(String)
     /// Simulator mode: `simctl delete` failed and no deletion is recorded.
     case simulatorDeleteFailed(String)
+    /// Guarded-item mode: the exact root, path shape, signature, or retained
+    /// metadata did not match the live target.
+    case guardedTargetInvalid(String)
+    /// Guarded-item mode: the newest metadata change was less than 72 hours
+    /// ago, could not be measured, or the walk had errors.
+    case minimumAgeNotMet(String)
+    /// Guarded-item mode: an open file, working directory, or command line
+    /// showed that a process could still be using the target.
+    case activeUseDetected(String)
+    /// Guarded-item mode: the live-use inspection failed, so deletion stopped
+    /// in the safe direction.
+    case activeUseCheckFailed(String)
+    /// Worktree mode: Git refused or failed the non-force removal.
+    case worktreeDeleteFailed(String)
 }
 
 /// Injectable command seam for the one real-home simulator mutation.
@@ -113,6 +127,10 @@ public actor SafeDeleter: ItemDeleting {
     private let isRealHome: Bool
     private let simulatorCommandRunner: any SimulatorDeviceCommandRunning
     private let simulatorDeviceTypeNames: any SimulatorDeviceTypeNameProviding
+    private let guardedUseChecker: any GuardedArtifactUseChecking
+    private let worktreeManager: any AgentWorktreeManaging
+    private let measurer: any DirectoryMeasurer
+    private let now: @Sendable () -> Date
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
@@ -127,14 +145,22 @@ public actor SafeDeleter: ItemDeleting {
             home: home,
             mode: mode,
             simulatorCommandRunner: simulatorCommandRunner,
-            simulatorDeviceTypeNames: SystemSimulatorDeviceTypeNameProvider())
+            simulatorDeviceTypeNames: SystemSimulatorDeviceTypeNameProvider(),
+            guardedUseChecker: SystemGuardedArtifactUseChecker(),
+            worktreeManager: SystemAgentWorktreeManager(),
+            measurer: FoundationMeasurer(),
+            now: Date.init)
     }
 
     init(
         home: URL,
         mode: Mode,
         simulatorCommandRunner: any SimulatorDeviceCommandRunning,
-        simulatorDeviceTypeNames: any SimulatorDeviceTypeNameProviding
+        simulatorDeviceTypeNames: any SimulatorDeviceTypeNameProviding,
+        guardedUseChecker: any GuardedArtifactUseChecking = SystemGuardedArtifactUseChecker(),
+        worktreeManager: any AgentWorktreeManaging = SystemAgentWorktreeManager(),
+        measurer: any DirectoryMeasurer = FoundationMeasurer(),
+        now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         self.mode = mode
         let candidate = Self.normalizedPath(home.cruftCanonical)
@@ -149,6 +175,10 @@ public actor SafeDeleter: ItemDeleting {
         self.isRealHome = candidate == realHome
         self.simulatorCommandRunner = simulatorCommandRunner
         self.simulatorDeviceTypeNames = simulatorDeviceTypeNames
+        self.guardedUseChecker = guardedUseChecker
+        self.worktreeManager = worktreeManager
+        self.measurer = measurer
+        self.now = now
     }
 
     @discardableResult
@@ -157,9 +187,17 @@ public actor SafeDeleter: ItemDeleting {
         let target = try Self.inspect(item.url)
         let targetPath = Self.normalizedPath(target.canonicalURL)
 
+        if item.deletionMode == .temporaryDerivedData {
+            return try await deleteTemporaryDerivedData(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
         try checkInsideHome(targetPath)
         if item.deletionMode == .simulatorDevice {
             return try deleteSimulator(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
+        if item.deletionMode == .agentWorktree {
+            return try await deleteAgentWorktree(
                 request, target: target, canonicalTargetPath: targetPath)
         }
         try Self.checkDenylist(targetPath)
@@ -179,6 +217,143 @@ public actor SafeDeleter: ItemDeleting {
             return children
         case .simulatorDevice:
             preconditionFailure("simulator deletion returned before the generic switch")
+        case .temporaryDerivedData, .agentWorktree:
+            preconditionFailure("guarded deletion returned before the generic switch")
+        }
+    }
+
+    private func deleteTemporaryDerivedData(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) async throws -> [URL] {
+        let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
+        let parent = request.item.url.deletingLastPathComponent()
+        let parentPath = Self.normalizedStandardizedPath(parent)
+        guard request.item.categoryID == TemporaryDerivedDataSource.id,
+            request.item.deletionMode == .temporaryDerivedData,
+            rawTargetPath == canonicalTargetPath,
+            target.isDirectory,
+            !target.isSymlink,
+            request.allowedRoots.count == 1,
+            Self.normalizedPath(request.allowedRoots[0].cruftCanonical) == parentPath,
+            Self.normalizedStandardizedPath(request.item.url.deletingLastPathComponent()) == parentPath,
+            TemporaryDerivedDataValidator.hasXcodeSignature(target.canonicalURL)
+        else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+
+        if isRealHome {
+            let expected = Self.normalizedPath(
+                URL(filePath: "/private/tmp", directoryHint: .isDirectory).cruftCanonical)
+            guard parentPath == expected else {
+                throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+            }
+        } else {
+            try checkInsideHome(canonicalTargetPath)
+            let expected = Self.normalizedPath(
+                URL(filePath: homePath, directoryHint: .isDirectory)
+                    .appending(path: "private-tmp").cruftCanonical)
+            guard parentPath == expected else {
+                throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+            }
+        }
+        try Self.checkDenylist(canonicalTargetPath)
+        try Self.validateOwnership(
+            ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
+        try await validateMinimumAge(target.canonicalURL)
+        try validateNotInUse(target.canonicalURL)
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        try perform([target.canonicalURL])
+        return [target.canonicalURL]
+    }
+
+    private func deleteAgentWorktree(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) async throws -> [URL] {
+        let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
+        let parent = request.item.url.deletingLastPathComponent()
+        let parentPath = Self.normalizedPath(parent.cruftCanonical)
+        guard request.item.categoryID == AgentWorktreeSource.id,
+            request.item.deletionMode == .agentWorktree,
+            rawTargetPath == canonicalTargetPath,
+            target.isDirectory,
+            !target.isSymlink,
+            request.allowedRoots.contains(where: {
+                Self.normalizedPath($0.cruftCanonical) == parentPath
+            }),
+            let retained = request.item.agentWorktreeMetadata,
+            retained.isEligibleForDeletion,
+            parent.lastPathComponent == "worktrees",
+            parent.deletingLastPathComponent().lastPathComponent == ".\(retained.agent.rawValue)"
+        else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+        try Self.checkDenylist(canonicalTargetPath)
+        try checkDepthFloor(canonicalTargetPath)
+        try Self.validateOwnership(
+            ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
+
+        guard worktreeManager.inspect(
+            target: target.canonicalURL,
+            repositoryRoot: retained.repositoryRoot,
+            agent: retained.agent) == retained
+        else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+        try await validateMinimumAge(target.canonicalURL)
+        try validateNotInUse(target.canonicalURL)
+        guard worktreeManager.inspect(
+            target: target.canonicalURL,
+            repositoryRoot: retained.repositoryRoot,
+            agent: retained.agent) == retained
+        else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        do {
+            try worktreeManager.remove(target: target.canonicalURL, metadata: retained)
+        } catch {
+            throw SafeDeleterError.worktreeDeleteFailed(String(describing: error))
+        }
+        guard !FileManager.default.fileExists(atPath: canonicalTargetPath) else {
+            throw SafeDeleterError.worktreeDeleteFailed("Git reported success but the worktree remains.")
+        }
+        deletedURLs.append(target.canonicalURL)
+        return [target.canonicalURL]
+    }
+
+    private func validateMinimumAge(_ target: URL) async throws {
+        let size: ItemSize
+        do {
+            size = try await measurer.measure(target) { _ in }
+        } catch {
+            throw SafeDeleterError.minimumAgeNotMet(target.path(percentEncoded: false))
+        }
+        guard GuardedCleanupPolicy.hasCompleteOldMeasurement(size, now: now()) else {
+            throw SafeDeleterError.minimumAgeNotMet(target.path(percentEncoded: false))
+        }
+    }
+
+    private func validateNotInUse(_ target: URL) throws {
+        do {
+            if try guardedUseChecker.isInUse(target) {
+                throw SafeDeleterError.activeUseDetected(target.path(percentEncoded: false))
+            }
+        } catch let error as SafeDeleterError {
+            throw error
+        } catch {
+            throw SafeDeleterError.activeUseCheckFailed(String(describing: error))
         }
     }
 

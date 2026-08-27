@@ -168,6 +168,14 @@ final class AppModel {
         SimulatorHierarchy(snapshot: latestSnapshots[SimulatorDeviceDataSource.id])
     }
 
+    var temporaryDerivedDataList: GuardedCleanupList {
+        GuardedCleanupList(snapshot: latestSnapshots[TemporaryDerivedDataSource.id])
+    }
+
+    var agentWorktreeList: GuardedCleanupList {
+        GuardedCleanupList(snapshot: latestSnapshots[AgentWorktreeSource.id])
+    }
+
     /// The EFFECTIVE projects root (the context's, after defaulting) — what
     /// the Settings window displays.
     var projectsRootDisplayPath: String {
@@ -283,13 +291,20 @@ final class AppModel {
         // The old root's numbers are no longer truthful: drop the retained
         // row (the fresh scan's partials repaint from zero) and the stale
         // snapshot — a clean planned from it would target old-root paths.
-        latestSnapshots[InRepoBuildSource.id] = nil
-        menuState.noteCleaned(InRepoBuildSource.id)
+        let projectCategories: Set<CategoryID> = [
+            InRepoBuildSource.id, AgentWorktreeSource.id,
+        ]
+        for category in projectCategories {
+            latestSnapshots[category] = nil
+            menuState.noteCleaned(category)
+        }
         lastRefreshAt = Date()
         Task {
             await oldEngine.cancelAll()
-            await self.statsStore.invalidate(category: InRepoBuildSource.id)
-            await newEngine.refresh(categories: [InRepoBuildSource.id], trigger: .manual)
+            for category in projectCategories {
+                await self.statsStore.invalidate(category: category)
+            }
+            await newEngine.refresh(categories: projectCategories, trigger: .manual)
         }
     }
 
@@ -391,6 +406,40 @@ final class AppModel {
             bytes: group.allocatedBytes)
         pendingPlan = makeConfirmation(
             title: "Delete \(groupName) Simulators",
+            plan: plan,
+            processWarnings: processWarnings,
+            entries: [entry])
+    }
+
+    /// Builds a plan for one age-gated temporary DerivedData or agent
+    /// worktree row. These categories never expose whole-category cleanup.
+    func requestDeleteGuardedItem(_ row: GuardedCleanupList.Row) {
+        guard pendingPlan == nil, !isCleaning, row.isDeletable else {
+            noteNothingToClean()
+            return
+        }
+        let category = row.measuredItem.item.categoryID
+        guard category == TemporaryDerivedDataSource.id || category == AgentWorktreeSource.id
+        else {
+            noteNothingToClean()
+            return
+        }
+        let processWarnings = ProcessGuard().warnings(for: [category])
+        let plan = CleanPlanner(sources: sources).planSubset(
+            category,
+            measuredItems: [row.measuredItem],
+            processWarnings: processWarnings)
+        guard plan.itemsByCategory[category]?.count == 1 else {
+            noteNothingToClean()
+            return
+        }
+        let entry = PendingCleanConfirmation.Entry(
+            id: category,
+            displayName: row.label,
+            itemCount: 1,
+            bytes: row.allocatedBytes)
+        pendingPlan = makeConfirmation(
+            title: "Delete \(row.label)",
             plan: plan,
             processWarnings: processWarnings,
             entries: [entry])
@@ -536,10 +585,10 @@ final class AppModel {
                 displayName: source.displayName,
                 deletedItems: categoryDeleted))
 
-            if source.id == SimulatorDeviceDataSource.id {
-                // Simulator plans are always exact subsets. Keep every
-                // untouched measured device visible while the automatic
-                // post-clean scan validates the retained remainder.
+            if !source.allowsWholeCategoryCleaning {
+                // Explicit-item plans keep every untouched measured item
+                // visible while the automatic post-clean scan validates the
+                // retained remainder.
                 if !confirmedDeletedPaths.isEmpty,
                     let snapshot = latestSnapshots[source.id]
                 {

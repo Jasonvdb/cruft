@@ -44,29 +44,40 @@ struct MenuContentView: View {
 
         Divider()
 
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(model.menuState.rows) { row in
-                if row.id == SimulatorDeviceDataSource.id {
-                    VStack(alignment: .leading, spacing: 6) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(model.menuState.rows) { row in
+                    if row.id == SimulatorDeviceDataSource.id {
+                        VStack(alignment: .leading, spacing: 6) {
+                            CategoryRowView(
+                                row: row,
+                                cleanDisabled: model.isCleaning,
+                                showsCleanAction: false,
+                                onClean: {})
+                            SimulatorDeviceHierarchyView(
+                                hierarchy: model.simulatorHierarchy,
+                                cleanDisabled: model.isCleaning,
+                                onDelete: { model.requestDeleteSimulatorGroup($0) })
+                        }
+                    } else if row.id == TemporaryDerivedDataSource.id {
+                        guardedCategory(
+                            row: row,
+                            list: model.temporaryDerivedDataList)
+                    } else if row.id == AgentWorktreeSource.id {
+                        guardedCategory(
+                            row: row,
+                            list: model.agentWorktreeList)
+                    } else {
                         CategoryRowView(
                             row: row,
                             cleanDisabled: model.isCleaning,
-                            showsCleanAction: false,
-                            onClean: {})
-                        SimulatorDeviceHierarchyView(
-                            hierarchy: model.simulatorHierarchy,
-                            cleanDisabled: model.isCleaning,
-                            onDelete: { model.requestDeleteSimulatorGroup($0) })
+                            showsCleanAction: true,
+                            onClean: { model.requestClean(category: row.id) })
                     }
-                } else {
-                    CategoryRowView(
-                        row: row,
-                        cleanDisabled: model.isCleaning,
-                        showsCleanAction: true,
-                        onClean: { model.requestClean(category: row.id) })
                 }
             }
         }
+        .frame(maxHeight: 510)
 
         Divider()
 
@@ -109,6 +120,23 @@ struct MenuContentView: View {
 
     private var totalText: String {
         model.menuBarTitle ?? "—"
+    }
+
+    private func guardedCategory(
+        row: MenuState.Row,
+        list: GuardedCleanupList
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            CategoryRowView(
+                row: row,
+                cleanDisabled: model.isCleaning,
+                showsCleanAction: false,
+                onClean: {})
+            GuardedCleanupListView(
+                list: list,
+                cleanDisabled: model.isCleaning,
+                onDelete: { model.requestDeleteGuardedItem($0) })
+        }
     }
 
     private var footerText: String {

@@ -494,7 +494,8 @@ public actor ScanEngine {
             return
         }
 
-        if trigger == .scheduled, let scanRoot,
+        if trigger == .scheduled, source.defersScheduledScanForRecentRootActivity,
+            let scanRoot,
             Self.recentlyModified(
                 scanRoot,
                 includeChildren: category == DerivedDataSource.id,

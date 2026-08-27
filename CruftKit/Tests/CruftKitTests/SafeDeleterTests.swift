@@ -692,6 +692,11 @@ private extension SafeDeleterError {
         case .simulatorTargetInvalid: "simulatorTargetInvalid"
         case .simulatorBooted: "simulatorBooted"
         case .simulatorDeleteFailed: "simulatorDeleteFailed"
+        case .guardedTargetInvalid: "guardedTargetInvalid"
+        case .minimumAgeNotMet: "minimumAgeNotMet"
+        case .activeUseDetected: "activeUseDetected"
+        case .activeUseCheckFailed: "activeUseCheckFailed"
+        case .worktreeDeleteFailed: "worktreeDeleteFailed"
         }
     }
 }

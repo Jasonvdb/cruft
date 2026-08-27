@@ -15,7 +15,8 @@ private struct StubQuerier: ProcessQuerying {
 @Test func xcodeRunningWarnsForEveryXcodeCategory() {
     let processGuard = ProcessGuard(querier: StubQuerier(bundleIDs: ["com.apple.dt.Xcode"]))
     for category in [
-        "derived-data", "xcode-misc", "xcode-archives", "simulator-device-data",
+        "derived-data", "temporary-derived-data", "xcode-misc", "xcode-archives",
+        "simulator-device-data",
     ] {
         let warnings = processGuard.warnings(for: [CategoryID(category)])
         #expect(warnings.count == 1)
@@ -46,7 +47,8 @@ private struct StubQuerier: ProcessQuerying {
     let processGuard = ProcessGuard(querier: StubQuerier())
     let everyCategory: Set<CategoryID> = [
         CategoryID("derived-data"), CategoryID("xcode-misc"), CategoryID("xcode-archives"),
-        CategoryID("simulator-device-data"), CategoryID("gradle"), CategoryID("js-cache"),
+        CategoryID("temporary-derived-data"), CategoryID("simulator-device-data"),
+        CategoryID("gradle"), CategoryID("js-cache"),
     ]
     #expect(processGuard.warnings(for: everyCategory).isEmpty)
 }

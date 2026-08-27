@@ -71,6 +71,7 @@ public struct FoundationMeasurer: DirectoryMeasurer {
         let keys: Set<URLResourceKey> = [
             .isRegularFileKey, .isSymbolicLinkKey,
             .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
+            .contentModificationDateKey,
         ]
         let errors = ErrorTally()
         guard let enumerator = FileManager.default.enumerator(
@@ -88,6 +89,9 @@ public struct FoundationMeasurer: DirectoryMeasurer {
         let clock = ContinuousClock()
         var lastEmission = clock.now
         var running = ItemSize()
+        if let rootValues = try? root.resourceValues(forKeys: [.contentModificationDateKey]) {
+            running.newestModificationDate = rootValues.contentModificationDate
+        }
 
         while true {
             let drained = autoreleasepool {
@@ -102,6 +106,11 @@ public struct FoundationMeasurer: DirectoryMeasurer {
                     // never followed, so a symlinked directory tree is never
                     // counted.
                     if values.isSymbolicLink == true { continue }
+                    if let modified = values.contentModificationDate,
+                        running.newestModificationDate.map({ modified > $0 }) ?? true
+                    {
+                        running.newestModificationDate = modified
+                    }
                     guard values.isRegularFile == true else { continue }
                     running.fileCount += 1
                     running.allocatedBytes += Int64(
