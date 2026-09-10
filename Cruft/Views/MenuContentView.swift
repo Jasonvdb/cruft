@@ -76,8 +76,12 @@ struct MenuContentView: View {
                     }
                 }
             }
+            // Keep row actions clear of the overlaid vertical scroll bar.
+            .padding(.trailing, 14)
         }
-        .frame(maxHeight: 510)
+        // A ScrollView has no useful intrinsic height inside MenuBarExtra.
+        // Give it a real viewport or the window can collapse it to zero.
+        .frame(height: categoryViewportHeight)
 
         Divider()
 
@@ -120,6 +124,11 @@ struct MenuContentView: View {
 
     private var totalText: String {
         model.menuBarTitle ?? "—"
+    }
+
+    private var categoryViewportHeight: CGFloat {
+        let categoryRows = CGFloat(model.menuState.rows.count) * 24
+        return min(510, max(260, categoryRows + 72))
     }
 
     private func guardedCategory(

@@ -3,15 +3,13 @@ import SwiftUI
 
 /// One category row: name (plus a warning badge for non-re-derivable
 /// categories), a status badge or spinner while work is in flight, the
-/// retained size on the right, and a hover-revealed Clean button — all
+/// retained size on the right, and a persistent Clean button — all
 /// values come straight from `MenuState.Row`, which owns the display rules.
 struct CategoryRowView: View {
     let row: MenuState.Row
     let cleanDisabled: Bool
     let showsCleanAction: Bool
     let onClean: () -> Void
-
-    @State private var isHovering = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -43,22 +41,18 @@ struct CategoryRowView: View {
                 .monospacedDigit()
                 .foregroundStyle(row.bytes == nil ? .secondary : .primary)
             if row.supportsCleaning && showsCleanAction {
-                // Always laid out for cleanable rows and revealed on hover,
-                // so the row does not shift when the pointer moves over it.
                 Button(action: onClean) {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
                 .disabled(cleanDisabled || !isCleanable)
-                .opacity(isHovering && isCleanable ? 1 : 0)
                 .accessibilityLabel("Clean \(row.displayName)")
                 .help("Clean \(row.displayName)…")
             }
         }
         .font(.callout)
         .help(helpText)
-        .onHover { isHovering = $0 }
     }
 
     private var isBusy: Bool {
@@ -225,8 +219,6 @@ private struct GuardedCleanupItemRow: View {
     let cleanDisabled: Bool
     let onDelete: () -> Void
 
-    @State private var isHovering = false
-
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(row.label)
@@ -248,14 +240,12 @@ private struct GuardedCleanupItemRow: View {
             .buttonStyle(.borderless)
             .controlSize(.small)
             .disabled(cleanDisabled || !row.isDeletable)
-            .opacity(isHovering && row.isDeletable ? 1 : 0)
             .accessibilityLabel("Delete \(row.label)")
             .help(actionHelp)
         }
         .font(.caption)
         .contentShape(Rectangle())
         .help(row.url.path(percentEncoded: false))
-        .onHover { isHovering = $0 }
     }
 
     private var actionHelp: String {
@@ -318,8 +308,6 @@ private struct SimulatorRuntimeRowView: View {
     let cleanDisabled: Bool
     let onDelete: () -> Void
 
-    @State private var isHovering = false
-
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(group.runtimeLabel)
@@ -341,7 +329,6 @@ private struct SimulatorRuntimeRowView: View {
             .buttonStyle(.borderless)
             .controlSize(.small)
             .disabled(cleanDisabled || !group.isDeletable)
-            .opacity(isHovering ? 1 : 0)
             .accessibilityLabel(
                 "Delete \(group.mainGroup.displayName) \(group.runtimeLabel) simulators")
             .help(actionHelp)
@@ -349,7 +336,6 @@ private struct SimulatorRuntimeRowView: View {
         .font(.caption)
         .contentShape(Rectangle())
         .help(rowHelp)
-        .onHover { isHovering = $0 }
     }
 
     private var deviceCountText: String {
