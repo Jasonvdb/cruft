@@ -4,11 +4,19 @@ import Foundation
 /// magnet otherwise). Order is display order in the menu and CLI output.
 public enum SourceRegistry {
     public static var allSources: [any CacheSource] {
+        allSources(agentWorktreePolicy: .strict)
+    }
+
+    /// The registry built around the user's worktree deletion policy. Only
+    /// `AgentWorktreeSource` reads it; every other source is policy-free.
+    public static func allSources(
+        agentWorktreePolicy: AgentWorktreeDeletionPolicy
+    ) -> [any CacheSource] {
         [
             DerivedDataSource(),
             TemporaryDerivedDataSource(),
             InRepoBuildSource(),
-            AgentWorktreeSource(),
+            AgentWorktreeSource(policy: agentWorktreePolicy),
             CargoSource(),
             GradleSource(),
             SwiftPMCacheSource(),

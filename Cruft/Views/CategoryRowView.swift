@@ -227,6 +227,13 @@ private struct GuardedCleanupItemRow: View {
             if let reason = row.blockingReasons.first {
                 badge(badgeText(reason), color: badgeColor(reason))
                     .help(helpText(reason))
+            } else if !row.waivedReasons.isEmpty {
+                // Deletable, but only because the user opted in. The badges
+                // stay so the cost is visible at the moment of clicking.
+                ForEach(row.waivedReasons) { reason in
+                    badge(badgeText(reason), color: waivedBadgeColor(reason))
+                        .help(waivedHelpText(reason))
+                }
             } else {
                 badge("72h+", color: .secondary)
                     .help("No metadata change was found in the last 72 hours. Live use is checked before deletion.")
@@ -251,7 +258,25 @@ private struct GuardedCleanupItemRow: View {
     private var actionHelp: String {
         if cleanDisabled { return "Wait for the current deletion to finish." }
         if let reason = row.blockingReasons.first { return helpText(reason) }
+        if let reason = row.waivedReasons.first { return waivedHelpText(reason) }
         return "Delete after a live active-use safety check…"
+    }
+
+    /// Uncommitted work is the only waived reason that loses data, so it is
+    /// the only one that goes red.
+    private func waivedBadgeColor(_ reason: GuardedCleanupList.BlockingReason) -> Color {
+        reason == .dirty ? .red : .orange
+    }
+
+    private func waivedHelpText(_ reason: GuardedCleanupList.BlockingReason) -> String {
+        switch reason {
+        case .dirty:
+            "Settings allow this: deleting discards the uncommitted and untracked files permanently."
+        case .notContainedInPrimaryBranch:
+            "Settings allow this: the commits are not in the local primary branch, but Git keeps the branch."
+        default:
+            helpText(reason)
+        }
     }
 
     private func badgeText(_ reason: GuardedCleanupList.BlockingReason) -> String {

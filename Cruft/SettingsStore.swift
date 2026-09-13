@@ -17,6 +17,8 @@ final class SettingsStore {
         static let cleanAllExcluded = "cleanAllExcluded"
         static let launchAtLogin = "launchAtLogin"
         static let rescanIntervalHours = "rescanIntervalHours"
+        static let allowsDirtyOrUnmergedWorktreeDeletion =
+            "allowsDirtyOrUnmergedWorktreeDeletion"
     }
 
     /// nil = ephemeral (CRUFT_HOME fixture run): mutations stay in memory.
@@ -43,7 +45,9 @@ final class SettingsStore {
                 cleanAllExcluded: Set(defaults.stringArray(forKey: Keys.cleanAllExcluded) ?? []),
                 launchAtLogin: defaults.bool(forKey: Keys.launchAtLogin),
                 rescanIntervalHours: defaults.object(forKey: Keys.rescanIntervalHours) as? Double
-                    ?? SettingsModel.defaultRescanIntervalHours
+                    ?? SettingsModel.defaultRescanIntervalHours,
+                allowsDirtyOrUnmergedWorktreeDeletion: defaults.bool(
+                    forKey: Keys.allowsDirtyOrUnmergedWorktreeDeletion)
             )
         }
     }
@@ -78,6 +82,19 @@ final class SettingsStore {
         }
     }
 
+    /// Opt-in for deleting worktrees that still hold uncommitted work or
+    /// unmerged commits. Changing it rebuilds the scan stack, because both
+    /// the source and SafeDeleter are constructed around the policy.
+    var allowsDirtyOrUnmergedWorktreeDeletion: Bool {
+        get { model.allowsDirtyOrUnmergedWorktreeDeletion }
+        set {
+            model.allowsDirtyOrUnmergedWorktreeDeletion = newValue
+            persist()
+        }
+    }
+
+    var agentWorktreePolicy: AgentWorktreeDeletionPolicy { model.agentWorktreePolicy }
+
     var cleanAllIncludedIDs: Set<CategoryID> { model.cleanAllIncludedIDs }
     var cleanAllExcludedIDs: Set<CategoryID> { model.cleanAllExcludedIDs }
 
@@ -90,7 +107,7 @@ final class SettingsStore {
         persist()
     }
 
-    /// Whole-model write on every mutation: five primitives, no fancy
+    /// Whole-model write on every mutation: six primitives, no fancy
     /// persistence. Sorted arrays keep the defaults plist diffable.
     private func persist() {
         guard let defaults else { return }
@@ -103,5 +120,8 @@ final class SettingsStore {
         defaults.set(model.cleanAllExcluded.sorted(), forKey: Keys.cleanAllExcluded)
         defaults.set(model.launchAtLogin, forKey: Keys.launchAtLogin)
         defaults.set(model.rescanIntervalHours, forKey: Keys.rescanIntervalHours)
+        defaults.set(
+            model.allowsDirtyOrUnmergedWorktreeDeletion,
+            forKey: Keys.allowsDirtyOrUnmergedWorktreeDeletion)
     }
 }

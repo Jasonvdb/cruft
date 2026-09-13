@@ -1,9 +1,13 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v5) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v6) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
+//
+// v6 adds `AgentWorktreeDeletionPolicy` and the policy-taking eligibility
+// method beside it. Both additions are purely additive: no stored property
+// changed, so every persisted snapshot from v5 and earlier still decodes.
 // =============================================================================
 
 /// Stable identifier for a cache category. Doubles as the CLI `--category` /
@@ -72,8 +76,10 @@ public enum DeletionMode: String, Sendable, Codable {
     /// deletion choke point rechecks its signature, age, and active use.
     case temporaryDerivedData
     /// One registered Claude/Codex Git worktree. The deletion choke point
-    /// rechecks Git state, age, and active use, then asks Git to remove it
-    /// without force.
+    /// rechecks Git state, age, and active use, then asks Git to remove it.
+    /// Force is used only for an uncommitted worktree the user has waived
+    /// through `AgentWorktreeDeletionPolicy`, and never more than once — so a
+    /// locked worktree stays un-removable.
     case agentWorktree
 }
 
@@ -140,6 +146,28 @@ public struct SimulatorDeviceMetadata: Sendable, Hashable, Codable {
     }
 }
 
+/// How much of a worktree's Git state the user has agreed to give up.
+/// `.strict` is the default everywhere and the only value a caller gets
+/// without opting in.
+///
+/// Waiving the two refusals below never waives anything else: the 72-hour
+/// age gate, the live active-use check, the locked-worktree refusal, and the
+/// registration and Git-identity requirements all still apply. `git worktree
+/// remove` leaves the branch ref in place, so an unmerged worktree's commits
+/// survive its deletion — uncommitted changes do not.
+public struct AgentWorktreeDeletionPolicy: Sendable, Hashable, Codable {
+    /// Delete only clean worktrees contained in the local primary branch.
+    public static let strict = AgentWorktreeDeletionPolicy(allowsDirtyOrUnmerged: false)
+    /// Also delete worktrees with uncommitted work or unmerged commits.
+    public static let permissive = AgentWorktreeDeletionPolicy(allowsDirtyOrUnmerged: true)
+
+    public let allowsDirtyOrUnmerged: Bool
+
+    public init(allowsDirtyOrUnmerged: Bool) {
+        self.allowsDirtyOrUnmerged = allowsDirtyOrUnmerged
+    }
+}
+
 /// Typed Git facts retained with a Claude/Codex worktree item. Discovery
 /// gathers these from local Git state only. SafeDeleter obtains them again
 /// immediately before deletion and requires an exact safe match.
@@ -188,9 +216,20 @@ public struct AgentWorktreeMetadata: Sendable, Hashable, Codable {
         self.isContainedInPrimaryBranch = isContainedInPrimaryBranch
     }
 
+    /// Strict eligibility — the historical rule. Every caller that does not
+    /// carry a policy keeps exactly this behaviour.
     public var isEligibleForDeletion: Bool {
-        isRegistered && isClean && !isLocked && isContainedInPrimaryBranch
-            && !headRevision.isEmpty && primaryReference != nil
+        isEligibleForDeletion(policy: .strict)
+    }
+
+    /// Eligibility under one policy. Registration, Git identity, and the
+    /// locked flag are never negotiable; only "has uncommitted work" and
+    /// "not contained in the primary branch" can be waived by the user.
+    public func isEligibleForDeletion(policy: AgentWorktreeDeletionPolicy) -> Bool {
+        guard isRegistered, !isLocked, !headRevision.isEmpty, primaryReference != nil
+        else { return false }
+        guard !policy.allowsDirtyOrUnmerged else { return true }
+        return isClean && isContainedInPrimaryBranch
     }
 }
 

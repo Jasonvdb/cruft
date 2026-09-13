@@ -13,6 +13,24 @@ import Testing
     #expect(model.cleanAllExcluded.isEmpty)
     #expect(model.launchAtLogin == false)
     #expect(model.rescanIntervalHours == SettingsModel.defaultRescanIntervalHours)
+    #expect(model.allowsDirtyOrUnmergedWorktreeDeletion == false)
+    #expect(model.agentWorktreePolicy == .strict)
+}
+
+@Test func worktreeOptInRoundTripsAndDefaultsToStrictWhenAbsent() throws {
+    var model = SettingsModel()
+    model.allowsDirtyOrUnmergedWorktreeDeletion = true
+    #expect(model.agentWorktreePolicy == .permissive)
+
+    let decoded = try JSONDecoder().decode(
+        SettingsModel.self, from: try JSONEncoder().encode(model))
+    #expect(decoded.allowsDirtyOrUnmergedWorktreeDeletion)
+
+    // A settings blob written before the opt-in existed decodes to strict.
+    let legacy = try JSONDecoder().decode(
+        SettingsModel.self, from: Data(#"{"launchAtLogin":true}"#.utf8))
+    #expect(legacy.allowsDirtyOrUnmergedWorktreeDeletion == false)
+    #expect(legacy.agentWorktreePolicy == .strict)
 }
 
 @Test(arguments: [

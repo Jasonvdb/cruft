@@ -37,6 +37,10 @@ public struct GuardedCleanupList: Sendable {
     public struct Row: Sendable, Identifiable {
         public let measuredItem: MeasuredItem
         public let blockingReasons: [BlockingReason]
+        /// Reasons that WOULD block under the strict policy but the user has
+        /// waived. The row stays deletable and keeps showing their badges —
+        /// a waived reason is still a fact worth seeing before clicking.
+        public let waivedReasons: [BlockingReason]
 
         public var id: String { measuredItem.item.id }
         public var label: String { measuredItem.item.label }
@@ -46,15 +50,25 @@ public struct GuardedCleanupList: Sendable {
             measuredItem.size?.newestModificationDate
         }
         public var isDeletable: Bool { blockingReasons.isEmpty }
+        /// True when confirming this row destroys work that exists nowhere
+        /// else. Unmerged commits survive (`git worktree remove` keeps the
+        /// branch); uncommitted and untracked files do not.
+        public var discardsUncommittedWork: Bool { waivedReasons.contains(.dirty) }
     }
 
     public let rows: [Row]
 
-    public init(snapshot: CategorySnapshot?, now: Date = Date()) {
+    public init(
+        snapshot: CategorySnapshot?,
+        policy: AgentWorktreeDeletionPolicy = .strict,
+        now: Date = Date()
+    ) {
         self.rows = (snapshot?.items ?? []).map { measured in
-            Row(
+            let split = Self.reasons(for: measured, policy: policy, now: now)
+            return Row(
                 measuredItem: measured,
-                blockingReasons: Self.blockingReasons(for: measured, now: now))
+                blockingReasons: split.blocking,
+                waivedReasons: split.waived)
         }
         .sorted {
             if $0.label != $1.label { return $0.label < $1.label }
@@ -62,9 +76,34 @@ public struct GuardedCleanupList: Sendable {
         }
     }
 
+    /// Strict blocking reasons — unchanged behaviour for callers that do not
+    /// carry a policy.
     public static func blockingReasons(
         for measured: MeasuredItem,
         now: Date = Date()
+    ) -> [BlockingReason] {
+        reasons(for: measured, policy: .strict, now: now).blocking
+    }
+
+    /// Splits the strict reason set into what still blocks and what the
+    /// policy waives. Only `.dirty` and `.notContainedInPrimaryBranch` are
+    /// ever waivable; age, measurement, lock, and metadata refusals are not.
+    public static func reasons(
+        for measured: MeasuredItem,
+        policy: AgentWorktreeDeletionPolicy,
+        now: Date = Date()
+    ) -> (blocking: [BlockingReason], waived: [BlockingReason]) {
+        let all = Set(strictReasons(for: measured, now: now))
+        guard policy.allowsDirtyOrUnmerged else {
+            return (ordered(all), [])
+        }
+        let waivable: Set<BlockingReason> = [.dirty, .notContainedInPrimaryBranch]
+        return (ordered(all.subtracting(waivable)), ordered(all.intersection(waivable)))
+    }
+
+    private static func strictReasons(
+        for measured: MeasuredItem,
+        now: Date
     ) -> [BlockingReason] {
         var reasons: Set<BlockingReason> = []
         if let size = measured.size {

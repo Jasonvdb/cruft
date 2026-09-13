@@ -71,7 +71,11 @@ final class AppModel {
     /// User settings (UserDefaults-backed; ephemeral under CRUFT_HOME).
     let settings: SettingsStore
 
-    private let sources: [any CacheSource]
+    /// Rebuilt (with the engine) when the worktree deletion policy changes —
+    /// `AgentWorktreeSource` is constructed around it.
+    private var sources: [any CacheSource]
+    /// The worktree policy the current `sources` and deleter were built with.
+    private var appliedWorktreePolicy: AgentWorktreeDeletionPolicy
     /// Effective home (real $HOME or the CRUFT_HOME fixture) — kept so
     /// `applySettingsChange()` can rebuild the context around a new
     /// projects root.
@@ -107,10 +111,12 @@ final class AppModel {
     private var cleanAllUserExcluded: Set<CategoryID> { settings.cleanAllExcludedIDs }
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        let sources = SourceRegistry.allSources
-        self.sources = sources
         let settings = SettingsStore(environment: environment)
         self.settings = settings
+        let worktreePolicy = settings.agentWorktreePolicy
+        self.appliedWorktreePolicy = worktreePolicy
+        let sources = SourceRegistry.allSources(agentWorktreePolicy: worktreePolicy)
+        self.sources = sources
 
         // CRUFT_HOME points scans at a fixture home (testing). Fixture runs
         // must not pollute the real stats file, so an overridden home keeps
@@ -129,7 +135,11 @@ final class AppModel {
         self.statsStore = statsStore
         // SafeDeleter refuses any home that is neither the real $HOME nor a
         // system temp area, so a bad CRUFT_HOME fails loudly at launch.
-        let engine = Self.makeEngine(sources: sources, context: context, statsStore: statsStore)
+        let engine = Self.makeEngine(
+            sources: sources,
+            context: context,
+            statsStore: statsStore,
+            agentWorktreePolicy: worktreePolicy)
         self.engine = engine
         self.debugDump = environment["CRUFT_DEBUG_DUMP"] != nil
         // HARD GUARD half 1: the autoclean harness can only arm when the
@@ -145,12 +155,18 @@ final class AppModel {
     }
 
     private static func makeEngine(
-        sources: [any CacheSource], context: ScanContext, statsStore: StatsStore
+        sources: [any CacheSource],
+        context: ScanContext,
+        statsStore: StatsStore,
+        agentWorktreePolicy: AgentWorktreeDeletionPolicy
     ) -> ScanEngine {
         ScanEngine(
             sources: sources,
             context: context,
-            deleter: try! SafeDeleter(home: context.home, mode: .live),
+            deleter: try! SafeDeleter(
+                home: context.home,
+                mode: .live,
+                agentWorktreePolicy: agentWorktreePolicy),
             statsStore: statsStore
         )
     }
@@ -173,7 +189,9 @@ final class AppModel {
     }
 
     var agentWorktreeList: GuardedCleanupList {
-        GuardedCleanupList(snapshot: latestSnapshots[AgentWorktreeSource.id])
+        GuardedCleanupList(
+            snapshot: latestSnapshots[AgentWorktreeSource.id],
+            policy: appliedWorktreePolicy)
     }
 
     /// The EFFECTIVE projects root (the context's, after defaulting) — what
@@ -266,27 +284,45 @@ final class AppModel {
     // MARK: - Settings
 
     /// Settings just changed (called by SettingsView after any edit).
-    /// Interval changes re-register the scheduler; a projects-root change
-    /// rebuilds the scan stack: the ScanContext is immutable, the engine's
-    /// event stream is single-consumer, and `cancelAll` is terminal — so
-    /// "apply" means tear down the consumer task, cancelAll the old engine,
-    /// build a fresh engine + consumer (same StatsStore), and rescan the
-    /// in-repo-build category. Clean All toggles deliberately reach none of
-    /// this — they are read live at plan time.
+    /// Interval changes re-register the scheduler; a projects-root change or a
+    /// worktree-policy change rebuilds the scan stack: the ScanContext is
+    /// immutable, the sources and SafeDeleter are built around the policy, the
+    /// engine's event stream is single-consumer, and `cancelAll` is terminal —
+    /// so "apply" means tear down the consumer task, cancelAll the old engine,
+    /// and build a fresh engine + consumer (same StatsStore). Only a root
+    /// change also invalidates the retained numbers. Clean All toggles
+    /// deliberately reach none of this — they are read live at plan time.
     func applySettingsChange() {
         rescanScheduler?.setIntervalHours(settings.rescanIntervalHours)
 
         let newContext = ScanContext(home: homeURL, projectsRoot: settings.projectsRootURL)
         let newRoot = newContext.projectsRoot.path(percentEncoded: false)
-        guard newRoot != context.projectsRoot.path(percentEncoded: false) else { return }
+        let rootChanged = newRoot != context.projectsRoot.path(percentEncoded: false)
+        let newPolicy = settings.agentWorktreePolicy
+        let policyChanged = newPolicy != appliedWorktreePolicy
+        guard rootChanged || policyChanged else { return }
 
         eventsTask?.cancel()
         let oldEngine = engine
         context = newContext
-        let newEngine = Self.makeEngine(sources: sources, context: newContext, statsStore: statsStore)
+        appliedWorktreePolicy = newPolicy
+        sources = SourceRegistry.allSources(agentWorktreePolicy: newPolicy)
+        let newEngine = Self.makeEngine(
+            sources: sources,
+            context: newContext,
+            statsStore: statsStore,
+            agentWorktreePolicy: newPolicy)
         engine = newEngine
         attachEventsConsumer()
         rescanScheduler?.setEngine(newEngine)
+
+        // A policy change alters only what the SAME discovered items are
+        // allowed to do, so every retained number stays truthful. Retire the
+        // old engine and keep the snapshots.
+        guard rootChanged else {
+            Task { await oldEngine.cancelAll() }
+            return
+        }
 
         // The old root's numbers are no longer truthful: drop the retained
         // row (the fresh scan's partials repaint from zero) and the stale
@@ -442,7 +478,27 @@ final class AppModel {
             title: "Delete \(row.label)",
             plan: plan,
             processWarnings: processWarnings,
-            entries: [entry])
+            entries: [entry],
+            extraDestructiveWarnings: Self.waivedWorktreeWarnings(for: row))
+    }
+
+    /// Spells out, per waived Git refusal, exactly what the confirmation is
+    /// about to give up. Empty for every row that passes the strict rules.
+    private static func waivedWorktreeWarnings(
+        for row: GuardedCleanupList.Row
+    ) -> [String] {
+        var warnings: [String] = []
+        if row.waivedReasons.contains(.dirty) {
+            warnings.append(
+                "This worktree has uncommitted or untracked files. "
+                    + "Deleting it destroys them permanently.")
+        }
+        if row.waivedReasons.contains(.notContainedInPrimaryBranch) {
+            warnings.append(
+                "This worktree's commits are not in the local primary branch. "
+                    + "Git keeps its branch, so the commits survive — the checked-out files do not.")
+        }
+        return warnings
     }
 
     /// Clean All membership comes from the planner's defaults plus the
@@ -642,7 +698,8 @@ final class AppModel {
         title: String,
         plan: CleanPlan,
         processWarnings: [String],
-        entries suppliedEntries: [PendingCleanConfirmation.Entry]? = nil
+        entries suppliedEntries: [PendingCleanConfirmation.Entry]? = nil,
+        extraDestructiveWarnings: [String] = []
     ) -> PendingCleanConfirmation {
         let entries = suppliedEntries ?? sources.compactMap {
             source -> PendingCleanConfirmation.Entry? in
@@ -660,7 +717,7 @@ final class AppModel {
                 return nil
             }
             return source.destructiveWarning
-        }
+        } + extraDestructiveWarnings
         return PendingCleanConfirmation(
             title: title,
             entries: entries,

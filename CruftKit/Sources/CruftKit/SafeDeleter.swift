@@ -131,6 +131,10 @@ public actor SafeDeleter: ItemDeleting {
     private let worktreeManager: any AgentWorktreeManaging
     private let measurer: any DirectoryMeasurer
     private let now: @Sendable () -> Date
+    /// How much worktree Git state the user has agreed to give up. Strict
+    /// unless a caller opts in, and the ONLY thing that can make this actor
+    /// pass `--force` to Git.
+    private let agentWorktreePolicy: AgentWorktreeDeletionPolicy
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
@@ -139,7 +143,8 @@ public actor SafeDeleter: ItemDeleting {
         home: URL,
         mode: Mode,
         simulatorCommandRunner: any SimulatorDeviceCommandRunning =
-            SimctlSimulatorDeviceCommandRunner()
+            SimctlSimulatorDeviceCommandRunner(),
+        agentWorktreePolicy: AgentWorktreeDeletionPolicy = .strict
     ) throws {
         try self.init(
             home: home,
@@ -149,7 +154,8 @@ public actor SafeDeleter: ItemDeleting {
             guardedUseChecker: SystemGuardedArtifactUseChecker(),
             worktreeManager: SystemAgentWorktreeManager(),
             measurer: FoundationMeasurer(),
-            now: Date.init)
+            now: Date.init,
+            agentWorktreePolicy: agentWorktreePolicy)
     }
 
     init(
@@ -160,7 +166,8 @@ public actor SafeDeleter: ItemDeleting {
         guardedUseChecker: any GuardedArtifactUseChecking = SystemGuardedArtifactUseChecker(),
         worktreeManager: any AgentWorktreeManaging = SystemAgentWorktreeManager(),
         measurer: any DirectoryMeasurer = FoundationMeasurer(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        agentWorktreePolicy: AgentWorktreeDeletionPolicy = .strict
     ) throws {
         self.mode = mode
         let candidate = Self.normalizedPath(home.cruftCanonical)
@@ -179,6 +186,7 @@ public actor SafeDeleter: ItemDeleting {
         self.worktreeManager = worktreeManager
         self.measurer = measurer
         self.now = now
+        self.agentWorktreePolicy = agentWorktreePolicy
     }
 
     @discardableResult
@@ -289,7 +297,7 @@ public actor SafeDeleter: ItemDeleting {
                 Self.normalizedPath($0.cruftCanonical) == parentPath
             }),
             let retained = request.item.agentWorktreeMetadata,
-            retained.isEligibleForDeletion,
+            retained.isEligibleForDeletion(policy: agentWorktreePolicy),
             parent.lastPathComponent == "worktrees",
             parent.deletingLastPathComponent().lastPathComponent == ".\(retained.agent.rawValue)"
         else {
@@ -321,8 +329,14 @@ public actor SafeDeleter: ItemDeleting {
             deletedURLs.append(target.canonicalURL)
             return [target.canonicalURL]
         }
+        // Force is reachable only through the user's opt-in, and only for the
+        // exact condition it exists for: uncommitted work. A locked worktree
+        // never gets here (eligibility refuses it) and the manager refuses a
+        // forced removal of one anyway.
+        let force = agentWorktreePolicy.allowsDirtyOrUnmerged && !retained.isClean
         do {
-            try worktreeManager.remove(target: target.canonicalURL, metadata: retained)
+            try worktreeManager.remove(
+                target: target.canonicalURL, metadata: retained, force: force)
         } catch {
             throw SafeDeleterError.worktreeDeleteFailed(String(describing: error))
         }

@@ -7,15 +7,20 @@ protocol AgentWorktreeManaging: Sendable {
         agent: AgentWorktreeMetadata.Agent
     ) -> AgentWorktreeMetadata?
 
-    func remove(target: URL, metadata: AgentWorktreeMetadata) throws
+    func remove(target: URL, metadata: AgentWorktreeMetadata, force: Bool) throws
 }
 
 /// Local Git adapter shared by discovery and delete-time validation. It never
-/// contacts a remote. Removal deliberately omits `--force`, so Git adds its
-/// own final dirty/locked refusal after Cruft's checks.
+/// contacts a remote.
+///
+/// Removal omits `--force` unless the caller asks for it, so Git adds its own
+/// final dirty refusal after Cruft's checks in the default case. `--force` is
+/// passed at most ONCE and never for a locked worktree: Git needs it twice to
+/// remove a locked one, so that refusal survives the user's opt-in.
 struct SystemAgentWorktreeManager: AgentWorktreeManaging {
     enum ManagerError: Error, Equatable {
         case removeFailed(Int32, String)
+        case forceRefusedForLockedWorktree
     }
 
     private let runner: any DirectProcessRunning
@@ -69,13 +74,16 @@ struct SystemAgentWorktreeManager: AgentWorktreeManaging {
             isContainedInPrimaryBranch: isContained)
     }
 
-    func remove(target: URL, metadata: AgentWorktreeMetadata) throws {
+    func remove(target: URL, metadata: AgentWorktreeMetadata, force: Bool) throws {
+        guard !force || !metadata.isLocked else {
+            throw ManagerError.forceRefusedForLockedWorktree
+        }
+        var arguments = ["worktree", "remove"]
+        if force { arguments.append("--force") }
+        arguments += ["--", target.cruftCanonical.path(percentEncoded: false)]
         let result = runGit(
             repositoryRoot: metadata.repositoryRoot,
-            arguments: [
-                "worktree", "remove", "--",
-                target.cruftCanonical.path(percentEncoded: false),
-            ])
+            arguments: arguments)
         guard let result, result.status == 0, !result.outputWasTruncated else {
             let message = result.map {
                 String(decoding: $0.standardError.prefix(2048), as: UTF8.self)
@@ -167,11 +175,12 @@ struct SystemAgentWorktreeManager: AgentWorktreeManaging {
 
 /// Registered Git worktrees stored under a repository's direct
 /// `.claude/worktrees` or `.codex/worktrees` directory. Cleanup is explicit
-/// per item and requires clean, unlocked, primary-branch-contained Git state.
+/// per item and requires unlocked, registered Git state. Whether uncommitted
+/// or unmerged worktrees also qualify is the user's `AgentWorktreeDeletionPolicy`.
 public struct AgentWorktreeSource: CacheSource {
     public static let id = CategoryID("agent-worktrees")
     public static let warning =
-        "Worktree deletion removes its checked-out files. Cruft rechecks Git state and active use, and never uses force."
+        "Worktree deletion removes its checked-out files. Cruft rechecks Git state and active use immediately before deleting."
 
     public let displayName = "Claude & Codex Worktrees"
     public let includedInCleanAllByDefault = false
@@ -181,13 +190,18 @@ public struct AgentWorktreeSource: CacheSource {
     public let defersScheduledScanForRecentRootActivity = false
 
     private let manager: any AgentWorktreeManaging
+    private let policy: AgentWorktreeDeletionPolicy
 
-    public init() {
-        self.manager = SystemAgentWorktreeManager()
+    public init(policy: AgentWorktreeDeletionPolicy = .strict) {
+        self.init(manager: SystemAgentWorktreeManager(), policy: policy)
     }
 
-    init(manager: any AgentWorktreeManaging) {
+    init(
+        manager: any AgentWorktreeManaging,
+        policy: AgentWorktreeDeletionPolicy = .strict
+    ) {
         self.manager = manager
+        self.policy = policy
     }
 
     public func scanRoot(context: ScanContext) -> URL? { context.projectsRoot }
@@ -199,7 +213,7 @@ public struct AgentWorktreeSource: CacheSource {
     public func canClean(item: CacheItem) -> Bool {
         item.categoryID == Self.id
             && item.deletionMode == .agentWorktree
-            && item.agentWorktreeMetadata?.isEligibleForDeletion == true
+            && item.agentWorktreeMetadata?.isEligibleForDeletion(policy: policy) == true
     }
 
     public func canClean(measuredItem: MeasuredItem) -> Bool {

@@ -42,6 +42,7 @@ struct SettingsView: View {
         Form {
             projectsRootSection
             cleanAllSection
+            worktreeSection
             generalSection
         }
         .formStyle(.grouped)
@@ -138,6 +139,42 @@ struct SettingsView: View {
                 set: { settings.setMembership($0 ? .standard : .excluded, for: row.id) }
             )
         }
+    }
+
+    // MARK: - Worktree deletion policy
+
+    /// The one opt-in that widens what a deletion may destroy. Default off,
+    /// and it waives exactly two Git refusals — every other guard stands.
+    private var worktreeSection: some View {
+        Section {
+            Toggle(isOn: dirtyOrUnmergedWorktreeBinding) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Allow deleting uncommitted or unmerged worktrees")
+                    Text("Uncommitted and untracked files are destroyed permanently. "
+                        + "Unmerged commits survive — Git keeps the branch.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        } header: {
+            Text("Claude & Codex Worktrees")
+        } footer: {
+            Text("Every other check still applies: registered with Git, not locked, "
+                + "unchanged for 72 hours, and not in active use.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var dirtyOrUnmergedWorktreeBinding: Binding<Bool> {
+        Binding(
+            get: { settings.allowsDirtyOrUnmergedWorktreeDeletion },
+            set: { newValue in
+                settings.allowsDirtyOrUnmergedWorktreeDeletion = newValue
+                // Rebuilds the sources and the deleter around the new policy.
+                model.applySettingsChange()
+            }
+        )
     }
 
     // MARK: - General

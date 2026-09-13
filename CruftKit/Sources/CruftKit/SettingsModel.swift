@@ -33,19 +33,32 @@ public struct SettingsModel: Sendable, Equatable, Codable {
     public private(set) var cleanAllExcluded: Set<String>
     public var launchAtLogin: Bool
     public private(set) var rescanIntervalHours: Double
+    /// Opt-in: let a Claude/Codex worktree with uncommitted work or unmerged
+    /// commits be deleted once it passes every other check. Default false —
+    /// the safe direction, and the value a missing or corrupt key decodes to.
+    public var allowsDirtyOrUnmergedWorktreeDeletion: Bool
 
     public init(
         projectsRootPath: String? = nil,
         cleanAllIncluded: Set<String> = [],
         cleanAllExcluded: Set<String> = [],
         launchAtLogin: Bool = false,
-        rescanIntervalHours: Double = SettingsModel.defaultRescanIntervalHours
+        rescanIntervalHours: Double = SettingsModel.defaultRescanIntervalHours,
+        allowsDirtyOrUnmergedWorktreeDeletion: Bool = false
     ) {
         self.projectsRootPath = projectsRootPath
         self.cleanAllExcluded = cleanAllExcluded
         self.cleanAllIncluded = cleanAllIncluded.subtracting(cleanAllExcluded)
         self.launchAtLogin = launchAtLogin
         self.rescanIntervalHours = Self.clampedInterval(rescanIntervalHours)
+        self.allowsDirtyOrUnmergedWorktreeDeletion = allowsDirtyOrUnmergedWorktreeDeletion
+    }
+
+    /// The worktree deletion policy this settings value expresses — what
+    /// `SourceRegistry` and `SafeDeleter` take.
+    public var agentWorktreePolicy: AgentWorktreeDeletionPolicy {
+        AgentWorktreeDeletionPolicy(
+            allowsDirtyOrUnmerged: allowsDirtyOrUnmergedWorktreeDeletion)
     }
 
     /// Decoding re-establishes the invariants the same way init does, so a
@@ -59,7 +72,9 @@ public struct SettingsModel: Sendable, Equatable, Codable {
             cleanAllExcluded: try container.decodeIfPresent(Set<String>.self, forKey: .cleanAllExcluded) ?? [],
             launchAtLogin: try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false,
             rescanIntervalHours: try container.decodeIfPresent(Double.self, forKey: .rescanIntervalHours)
-                ?? Self.defaultRescanIntervalHours
+                ?? Self.defaultRescanIntervalHours,
+            allowsDirtyOrUnmergedWorktreeDeletion: try container.decodeIfPresent(
+                Bool.self, forKey: .allowsDirtyOrUnmergedWorktreeDeletion) ?? false
         )
     }
 

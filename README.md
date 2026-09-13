@@ -29,7 +29,7 @@ iOS device support, source code, and unrelated user data remain off limits — s
 | Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData` (per-project) | ✅ rebuilds on next build |
 | Temporary DerivedData | direct Xcode-shaped `*DerivedData*` folders under `/private/tmp` | ✅ rebuilds; explicit item deletion only after 72 h without changes and a live-use check |
 | Project build folders | `build/`, `.build/`, `.gradle/` next to project markers under your projects root | ✅ rebuilds |
-| Claude & Codex worktrees | direct children of `.claude/worktrees` and `.codex/worktrees` under each repository | ⚠️ explicit item deletion only; clean, unlocked, contained in the local primary branch, unchanged for 72 h, and not active |
+| Claude & Codex worktrees | direct children of `.claude/worktrees` and `.codex/worktrees` under each repository | ⚠️ explicit item deletion only; registered, unlocked, unchanged for 72 h, and not active. Clean and merged by default; uncommitted or unmerged worktrees need an opt-in in Settings |
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
 | Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** | ✅ regenerates |
@@ -56,11 +56,20 @@ metadata scan shows no change for at least 72 hours. Immediately before
 deletion, cruft scans the age again and refuses any directory with an open file,
 process working directory, or process command line that refers to it.
 
-Worktrees have additional local Git checks. They must be registered, clean,
-unlocked, and fully contained in `main`, `master`, the local origin default, or
-`develop` (in that order). Cruft then runs `git worktree remove` without
-`--force`, so Git performs a final dirty and lock check. No remote or pull
-request service is contacted.
+Worktrees have additional local Git checks. They must be registered and
+unlocked. By default they must also be clean and fully contained in `main`,
+`master`, the local origin default, or `develop` (in that order). Cruft then
+runs `git worktree remove` without `--force`, so Git performs a final dirty and
+lock check. No remote or pull request service is contacted.
+
+**Allow deleting uncommitted or unmerged worktrees** in Settings waives exactly
+those last two refusals, and nothing else. The 72-hour age gate, the live
+active-use check, the lock refusal, and the registration and Git-identity
+requirements all still apply. An uncommitted removal passes `--force` once —
+never twice, so a locked worktree stays un-removable — and the confirmation
+dialog names in red what it is about to discard. Unmerged commits survive:
+`git worktree remove` keeps the branch ref. Uncommitted and untracked files do
+not. The setting is off by default.
 
 Never deleted: `/private/tmp` itself, any `.claude/worktrees` or
 `.codex/worktrees` root, the CoreSimulator **Devices root**, iOS/watchOS DeviceSupport,
@@ -92,7 +101,9 @@ cruft deletes files, so it is engineered like it.
   be direct `/private/tmp` children with an Xcode `Build` signature. Worktrees
   must be direct registered Claude/Codex children with safe local Git state.
   Both modes require a complete 72-hour age measurement and a live-use check
-  at the deletion choke point. Worktrees are removed by Git without force.
+  at the deletion choke point. Worktrees are removed by Git without force
+  unless the user opted in to deleting uncommitted ones, and never with force
+  twice.
 - **Adversarially tested.** The test suite includes named attack fixtures —
   symlinks escaping home, symlinks into `.git`, mis-cased denylist
   components on case-insensitive APFS, `..` traversal, depth-floor edges —
