@@ -284,10 +284,16 @@ public actor ScanEngine {
             let resolved: [CacheItem]
             if let items {
                 resolved = items
-            } else if let discovered = lastDiscovered[category] {
-                resolved = discovered
             } else {
-                resolved = try await source.discover(context: context)
+                // A whole-category clean takes only the items the source
+                // accepts now; explicit item lists were checked above.
+                let discovered: [CacheItem]
+                if let retained = lastDiscovered[category] {
+                    discovered = retained
+                } else {
+                    discovered = try await source.discover(context: context)
+                }
+                resolved = discovered.filter(source.canClean(item:))
             }
 
             freeBefore = Self.freeBytes(onVolumeOf: context.home)

@@ -1,13 +1,18 @@
 import Foundation
 
 // =============================================================================
-// FROZEN CONTRACTS (v6) — this file is the shared API surface all phases code
+// FROZEN CONTRACTS (v7) — this file is the shared API surface all phases code
 // against. Changes require an integrator-approved "contracts vN" bump; never
 // edit it from a parallel work branch.
 //
 // v6 adds `AgentWorktreeDeletionPolicy` and the policy-taking eligibility
 // method beside it. Both additions are purely additive: no stored property
 // changed, so every persisted snapshot from v5 and earlier still decodes.
+//
+// v7 adds three guarded deletion modes (`testDeviceClone`, `flowRunArtifacts`,
+// `simulatorRuntime`), their typed metadata, and the opt-in live-use check on
+// `DeletionRequest`. Every new stored property is optional or defaulted, so
+// snapshots from v6 and earlier still decode.
 // =============================================================================
 
 /// Stable identifier for a cache category. Doubles as the CLI `--category` /
@@ -81,6 +86,17 @@ public enum DeletionMode: String, Sendable, Codable {
     /// through `AgentWorktreeDeletionPolicy`, and never more than once — so a
     /// locked worktree stays un-removable.
     case agentWorktree
+    /// One registered clone in Xcode's XCTestDevices device set. SafeDeleter
+    /// validates the exact UUID directory and uses `simctl --set … delete`.
+    case testDeviceClone
+    /// One /flow run's artifact directory under /private/tmp/flow-runs. The
+    /// choke point rereads the run manifest, applies the age gate unless the
+    /// manifest records a terminal state, and checks live use.
+    case flowRunArtifacts
+    /// One simulator runtime disk image. It lives outside home and is owned by
+    /// the system, so SafeDeleter rechecks `simctl` facts and asks `simctl
+    /// runtime delete` to remove it. No file is removed directly.
+    case simulatorRuntime
 }
 
 /// Typed simulator facts retained with a discovered item. CoreSimulator does
@@ -233,6 +249,113 @@ public struct AgentWorktreeMetadata: Sendable, Hashable, Codable {
     }
 }
 
+/// Typed /flow run facts retained with an artifact directory. They come from
+/// the run manifest in the flow state directory (`~/.local/state/flow-runs`).
+/// A missing manifest is a fact too: such a directory needs the full age gate.
+public struct FlowRunMetadata: Sendable, Hashable, Codable {
+    /// Manifest states that `flow_run.py` treats as finished.
+    public static let terminalStates: Set<String> = [
+        "merged", "review_paused", "failed", "timed_out", "cancelled", "abandoned",
+    ]
+    /// Manifest states that mean a session still owns the run.
+    public static let liveStates: Set<String> = ["active", "manual_testing"]
+
+    public let runID: String
+    /// The exact manifest state, or nil when no valid manifest exists.
+    public let state: String?
+    /// The last manifest heartbeat, when the manifest records one.
+    public let heartbeatAt: Date?
+
+    public init(runID: String, state: String?, heartbeatAt: Date?) {
+        self.runID = runID
+        self.state = state
+        self.heartbeatAt = heartbeatAt
+    }
+
+    public var hasManifest: Bool { state != nil }
+    public var isTerminal: Bool { state.map(Self.terminalStates.contains) == true }
+    public var isLive: Bool { state.map(Self.liveStates.contains) == true }
+
+    /// The owner said the run is done, so the age gate is not needed. Every
+    /// other state keeps the full 72-hour gate.
+    public var requiresAgeGate: Bool { !isTerminal }
+
+    /// A live run blocks deletion until its heartbeat is older than the
+    /// guarded-cleanup interval. A live run with no heartbeat always blocks.
+    public func isActive(now: Date = Date()) -> Bool {
+        guard isLive else { return false }
+        guard let heartbeatAt else { return true }
+        return now.timeIntervalSince(heartbeatAt) < GuardedCleanupPolicy.minimumUntouchedInterval
+    }
+}
+
+/// Typed `simctl runtime list` facts retained with a runtime disk image.
+/// SafeDeleter obtains them again immediately before deletion.
+public struct SimulatorRuntimeMetadata: Sendable, Hashable, Codable {
+    /// The disk image UUID that `simctl runtime delete` takes.
+    public let identifier: String
+    /// `com.apple.CoreSimulator.SimRuntime.iOS-26-4`. Several builds can
+    /// share one runtime identifier.
+    public let runtimeIdentifier: String
+    public let platformName: String
+    public let version: String
+    public let build: String
+    public let state: String
+    public let isDeletableBySimctl: Bool
+    /// Devices in the default and XCTestDevices sets that use
+    /// `runtimeIdentifier`, whatever their build.
+    public let deviceCount: Int
+    /// The highest installed version for this platform. Kept so Xcode always
+    /// has a runtime to run on.
+    public let isNewestForPlatform: Bool
+    public let lastUsedAt: Date?
+
+    public init(
+        identifier: String,
+        runtimeIdentifier: String,
+        platformName: String,
+        version: String,
+        build: String,
+        state: String,
+        isDeletableBySimctl: Bool,
+        deviceCount: Int,
+        isNewestForPlatform: Bool,
+        lastUsedAt: Date?
+    ) {
+        self.identifier = identifier
+        self.runtimeIdentifier = runtimeIdentifier
+        self.platformName = platformName
+        self.version = version
+        self.build = build
+        self.state = state
+        self.isDeletableBySimctl = isDeletableBySimctl
+        self.deviceCount = deviceCount
+        self.isNewestForPlatform = isNewestForPlatform
+        self.lastUsedAt = lastUsedAt
+    }
+
+    public var label: String { "\(platformName) \(version) (\(build))" }
+    public var isReady: Bool { state == "Ready" && isDeletableBySimctl }
+
+    public var isEligibleForDeletion: Bool {
+        UUID(uuidString: identifier) != nil
+            && !runtimeIdentifier.isEmpty
+            && isReady
+            && deviceCount == 0
+            && !isNewestForPlatform
+    }
+
+    /// Identity plus every fact that eligibility depends on. `lastUsedAt`
+    /// changes on each simulator launch and is not compared.
+    public func matchesForDeletion(_ other: SimulatorRuntimeMetadata) -> Bool {
+        identifier == other.identifier
+            && runtimeIdentifier == other.runtimeIdentifier
+            && version == other.version
+            && build == other.build
+            && isEligibleForDeletion == other.isEligibleForDeletion
+    }
+}
+
 /// One cleanable thing on disk, discovered by a `CacheSource`. Identity is
 /// the category plus the absolute path — never the display label (six repos
 /// on the reference machine have an item literally named "build").
@@ -248,6 +371,10 @@ public struct CacheItem: Identifiable, Sendable, Hashable, Codable {
     /// Present only for Claude/Codex worktrees. Optional preserves decoding
     /// of snapshots written before contracts v5.
     public let agentWorktreeMetadata: AgentWorktreeMetadata?
+    /// Present only for /flow run artifacts. Optional since contracts v7.
+    public let flowRunMetadata: FlowRunMetadata?
+    /// Present only for simulator runtimes. Optional since contracts v7.
+    public let simulatorRuntimeMetadata: SimulatorRuntimeMetadata?
 
     public init(
         categoryID: CategoryID,
@@ -255,7 +382,9 @@ public struct CacheItem: Identifiable, Sendable, Hashable, Codable {
         label: String,
         deletionMode: DeletionMode = .entireItem,
         simulatorMetadata: SimulatorDeviceMetadata? = nil,
-        agentWorktreeMetadata: AgentWorktreeMetadata? = nil
+        agentWorktreeMetadata: AgentWorktreeMetadata? = nil,
+        flowRunMetadata: FlowRunMetadata? = nil,
+        simulatorRuntimeMetadata: SimulatorRuntimeMetadata? = nil
     ) {
         self.categoryID = categoryID
         self.url = url
@@ -263,6 +392,8 @@ public struct CacheItem: Identifiable, Sendable, Hashable, Codable {
         self.deletionMode = deletionMode
         self.simulatorMetadata = simulatorMetadata
         self.agentWorktreeMetadata = agentWorktreeMetadata
+        self.flowRunMetadata = flowRunMetadata
+        self.simulatorRuntimeMetadata = simulatorRuntimeMetadata
         self.id = "\(categoryID.rawValue):\(url.path(percentEncoded: false))"
     }
 }
@@ -376,10 +507,15 @@ public struct DeletionRequest: Sendable {
     /// Roots the deleter must verify the item against (rule 3). Sources
     /// provide these via `allowedDeletionRoots(context:)`.
     public let allowedRoots: [URL]
+    /// When true, the generic modes also refuse a target that an open file,
+    /// process working directory, or process command line refers to. Sources
+    /// opt in through `CacheSource.requiresLiveUseCheck`.
+    public let requiresLiveUseCheck: Bool
 
-    public init(item: CacheItem, allowedRoots: [URL]) {
+    public init(item: CacheItem, allowedRoots: [URL], requiresLiveUseCheck: Bool = false) {
         self.item = item
         self.allowedRoots = allowedRoots
+        self.requiresLiveUseCheck = requiresLiveUseCheck
     }
 }
 
@@ -420,6 +556,10 @@ public protocol CacheSource: Sendable {
     /// modified recently. Sources with broad roots and per-item age checks
     /// disable this so unrelated activity does not suppress discovery.
     var defersScheduledScanForRecentRootActivity: Bool { get }
+    /// Whether every generic deletion first checks open files, working
+    /// directories, and command lines. For caches that a running tool can
+    /// execute code from or build into.
+    var requiresLiveUseCheck: Bool { get }
     /// Root used for scan safety gates and discovery. This is separate from
     /// deletion roots so a view-only source can declare what it measures
     /// without making that path eligible for deletion.
@@ -446,6 +586,7 @@ public extension CacheSource {
     var allowsWholeCategoryCleaning: Bool { supportsCleaning }
     var destructiveWarning: String? { nil }
     var defersScheduledScanForRecentRootActivity: Bool { true }
+    var requiresLiveUseCheck: Bool { false }
 
     func canClean(item: CacheItem) -> Bool {
         supportsCleaning && item.categoryID == id
@@ -470,7 +611,10 @@ public extension CacheSource {
             throw CacheSourceError.itemCleaningUnsupported(id, item.id)
         }
         return try await deleter.delete(
-            DeletionRequest(item: item, allowedRoots: allowedDeletionRoots(context: context))
+            DeletionRequest(
+                item: item,
+                allowedRoots: allowedDeletionRoots(context: context),
+                requiresLiveUseCheck: requiresLiveUseCheck)
         )
     }
 }

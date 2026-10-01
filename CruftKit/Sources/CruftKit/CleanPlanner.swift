@@ -51,8 +51,12 @@ public struct CleanPlanner: Sendable {
                     && source.includedInCleanAllByDefault
                     && !userExcluded.contains(id))
             guard included else { continue }
-            itemsByCategory[id] = snapshot.items.map(\.item)
-            estimatedBytes += snapshot.totalBytes
+            // Only items the source accepts right now, so one booted test
+            // clone never fails the whole run.
+            let eligible = snapshot.items.filter(source.canClean(measuredItem:))
+            guard !eligible.isEmpty else { continue }
+            itemsByCategory[id] = eligible.map(\.item)
+            estimatedBytes += eligible.reduce(0) { $0 + ($1.size?.allocatedBytes ?? 0) }
             appendDestructiveWarning(for: source, to: &warnings)
         }
         return CleanPlan(
@@ -76,12 +80,14 @@ public struct CleanPlanner: Sendable {
         if let source = source(for: category),
             source.supportsCleaning,
             source.allowsWholeCategoryCleaning,
-            let snapshot = snapshots.first(where: { $0.categoryID == category }),
-            !snapshot.items.isEmpty
+            let snapshot = snapshots.first(where: { $0.categoryID == category })
         {
-            itemsByCategory[category] = snapshot.items.map(\.item)
-            estimatedBytes = snapshot.totalBytes
-            appendDestructiveWarning(for: source, to: &warnings)
+            let eligible = snapshot.items.filter(source.canClean(measuredItem:))
+            if !eligible.isEmpty {
+                itemsByCategory[category] = eligible.map(\.item)
+                estimatedBytes = eligible.reduce(0) { $0 + ($1.size?.allocatedBytes ?? 0) }
+                appendDestructiveWarning(for: source, to: &warnings)
+            }
         }
         return CleanPlan(
             itemsByCategory: itemsByCategory,

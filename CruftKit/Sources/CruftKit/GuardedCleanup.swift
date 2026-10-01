@@ -1,6 +1,7 @@
 import Foundation
 
-/// Shared age rule for temporary DerivedData and agent worktrees. Age is one
+/// Shared age rule for temporary DerivedData, agent worktrees, and /flow
+/// runs without a finished manifest. Age is one
 /// required signal, never proof of inactivity by itself. SafeDeleter repeats
 /// the age check and performs live open-file/process checks before deletion.
 public enum GuardedCleanupPolicy {
@@ -18,7 +19,9 @@ public enum GuardedCleanupPolicy {
     }
 }
 
-/// Pure presentation model for the two explicit-item cleanup categories.
+/// Pure presentation model for the explicit-item cleanup categories:
+/// temporary DerivedData, agent worktrees, /flow run artifacts, and
+/// simulator runtimes.
 /// It explains why a row is blocked without claiming that age proves idle
 /// use. The live active-use check happens only after user confirmation.
 public struct GuardedCleanupList: Sendable {
@@ -30,8 +33,27 @@ public struct GuardedCleanupList: Sendable {
         case dirty
         case locked
         case notContainedInPrimaryBranch
+        /// A /flow manifest records a live run with a recent heartbeat.
+        case runActive
+        /// At least one simulator in either device set uses the runtime.
+        case runtimeInUse
+        /// The highest installed version for its platform; always kept.
+        case runtimeNewest
+        /// `simctl` does not report the runtime as Ready and deletable.
+        case runtimeNotReady
 
         public var id: Self { self }
+    }
+
+    /// Why a deletable row is deletable — the badge a row shows instead of a
+    /// blocking reason.
+    public enum ReadyNote: Sendable, Hashable {
+        /// No metadata change for 72 hours.
+        case untouched
+        /// The /flow manifest records a finished run.
+        case finishedRun
+        /// No simulator uses the runtime and a newer one is installed.
+        case unusedRuntime
     }
 
     public struct Row: Sendable, Identifiable {
@@ -50,6 +72,16 @@ public struct GuardedCleanupList: Sendable {
             measuredItem.size?.newestModificationDate
         }
         public var isDeletable: Bool { blockingReasons.isEmpty }
+        public var readyNote: ReadyNote {
+            switch measuredItem.item.deletionMode {
+            case .simulatorRuntime:
+                return .unusedRuntime
+            case .flowRunArtifacts where measuredItem.item.flowRunMetadata?.isTerminal == true:
+                return .finishedRun
+            default:
+                return .untouched
+            }
+        }
         /// True when confirming this row destroys work that exists nowhere
         /// else. Unmerged commits survive (`git worktree remove` keeps the
         /// branch); uncommitted and untracked files do not.
@@ -106,6 +138,25 @@ public struct GuardedCleanupList: Sendable {
         now: Date
     ) -> [BlockingReason] {
         var reasons: Set<BlockingReason> = []
+        switch measured.item.deletionMode {
+        case .simulatorRuntime:
+            // Runtime eligibility is a fact of simulator use, not of age.
+            guard let runtime = measured.item.simulatorRuntimeMetadata,
+                UUID(uuidString: runtime.identifier) != nil,
+                runtime.isReady
+            else { return [.runtimeNotReady] }
+            if runtime.deviceCount > 0 { reasons.insert(.runtimeInUse) }
+            if runtime.isNewestForPlatform { reasons.insert(.runtimeNewest) }
+            return Self.ordered(reasons)
+        case .flowRunArtifacts:
+            if let run = measured.item.flowRunMetadata {
+                if run.isActive(now: now) { reasons.insert(.runActive) }
+                // A finished run is the owner's statement; no age needed.
+                if !run.requiresAgeGate { return Self.ordered(reasons) }
+            }
+        default:
+            break
+        }
         if let size = measured.size {
             if size.erroredEntries > 0 {
                 reasons.insert(.measurementIncomplete)
@@ -141,6 +192,7 @@ public struct GuardedCleanupList: Sendable {
 
     private static func ordered(_ reasons: Set<BlockingReason>) -> [BlockingReason] {
         let order: [BlockingReason] = [
+            .runActive, .runtimeInUse, .runtimeNewest, .runtimeNotReady,
             .dirty, .locked, .notContainedInPrimaryBranch,
             .worktreeMetadataUnknown, .measurementIncomplete, .ageUnknown, .recent,
         ]

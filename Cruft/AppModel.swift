@@ -67,6 +67,10 @@ final class AppModel {
     private(set) var isCleaning = false
     /// Transient "nothing to clean" notice (auto-clears after a moment).
     private(set) var showsNothingToClean = false
+    /// View-only space that cruft does not clean, measured off the main
+    /// actor. Empty until the first measurement finishes.
+    private(set) var storageOverview: StorageOverview = .empty
+    private(set) var isMeasuringStorageOverview = false
 
     /// User settings (UserDefaults-backed; ephemeral under CRUFT_HOME).
     let settings: SettingsStore
@@ -103,6 +107,7 @@ final class AppModel {
     /// every `.finished` event) — what clean plans are built from.
     private var latestSnapshots: [CategoryID: CategorySnapshot] = [:]
     private var nothingToCleanClearTask: Task<Void, Never>?
+    private var storageOverviewTask: Task<Void, Never>?
 
     /// User overrides for Clean All membership, read live from settings at
     /// plan time — toggles never rebuild the engine (they only affect
@@ -194,6 +199,20 @@ final class AppModel {
             policy: appliedWorktreePolicy)
     }
 
+    var flowRunList: GuardedCleanupList {
+        GuardedCleanupList(snapshot: latestSnapshots[FlowRunArtifactSource.id])
+    }
+
+    var simulatorRuntimeList: GuardedCleanupList {
+        GuardedCleanupList(snapshot: latestSnapshots[SimulatorRuntimeSource.id])
+    }
+
+    /// Categories whose rows expose one delete action per item.
+    static let explicitItemCategories: Set<CategoryID> = [
+        TemporaryDerivedDataSource.id, AgentWorktreeSource.id,
+        FlowRunArtifactSource.id, SimulatorRuntimeSource.id,
+    ]
+
     /// The EFFECTIVE projects root (the context's, after defaulting) — what
     /// the Settings window displays.
     var projectsRootDisplayPath: String {
@@ -229,15 +248,39 @@ final class AppModel {
         attachEventsConsumer()
         // The debug dump exists to compare a full live scan against the CLI,
         // so it always scans regardless of staleness.
+        refreshStorageOverview()
         if persistedStatsAreIncompleteOrStale(persisted) || debugDump {
             lastRefreshAt = Date()
             await engine.refresh(trigger: .launch)
         }
     }
 
+    /// Measures the view-only storage overview at utility priority. A running
+    /// measurement is never doubled. A nonzero `maximumAge` skips a
+    /// measurement that is still fresh.
+    func refreshStorageOverview(ifOlderThan maximumAge: TimeInterval = 0) {
+        guard !isMeasuringStorageOverview else { return }
+        if maximumAge > 0, let measuredAt = storageOverview.measuredAt,
+            Date().timeIntervalSince(measuredAt) < maximumAge
+        {
+            return
+        }
+        isMeasuringStorageOverview = true
+        let probe = StorageOverviewProbe(home: context.home)
+        storageOverviewTask = Task.detached(priority: .utility) { [weak self] in
+            let overview = await probe.load()
+            await MainActor.run {
+                guard let self else { return }
+                self.storageOverview = overview
+                self.isMeasuringStorageOverview = false
+            }
+        }
+    }
+
     func refreshNow() {
         lastRefreshAt = Date()
         lastCleanResult = nil
+        refreshStorageOverview()
         Task { await engine.refresh(trigger: .manual) }
     }
 
@@ -245,6 +288,7 @@ final class AppModel {
     func menuOpened() {
         guard started else { return }
         refreshExternallyCleanedCategories()
+        refreshStorageOverview(ifOlderThan: Self.menuOpenStaleness)
         let reference = [lastRefreshAt, newestDisplayedUpdate].compactMap { $0 }.max()
         if let reference, Date().timeIntervalSince(reference) <= Self.menuOpenStaleness {
             return
@@ -348,6 +392,7 @@ final class AppModel {
     /// the engine for good, flush coalesced stats, then terminate.
     func quit() {
         rescanScheduler?.invalidate()
+        storageOverviewTask?.cancel()
         Task {
             await engine.cancelAll()
             await statsStore.flush()
@@ -447,20 +492,23 @@ final class AppModel {
             entries: [entry])
     }
 
-    /// Builds a plan for one age-gated temporary DerivedData or agent
-    /// worktree row. These categories never expose whole-category cleanup.
+    /// Builds a plan for one explicit-item row: temporary DerivedData, an
+    /// agent worktree, a /flow run, or a simulator runtime. These categories
+    /// never expose whole-category cleanup.
     func requestDeleteGuardedItem(_ row: GuardedCleanupList.Row) {
         guard pendingPlan == nil, !isCleaning, row.isDeletable else {
             noteNothingToClean()
             return
         }
         let category = row.measuredItem.item.categoryID
-        guard category == TemporaryDerivedDataSource.id || category == AgentWorktreeSource.id
-        else {
+        guard Self.explicitItemCategories.contains(category) else {
             noteNothingToClean()
             return
         }
-        let processWarnings = ProcessGuard().warnings(for: [category])
+        var processWarnings = ProcessGuard().warnings(for: [category])
+        if category == SimulatorRuntimeSource.id {
+            processWarnings.append(SimulatorRuntimeSource.downloadNotice)
+        }
         let plan = CleanPlanner(sources: sources).planSubset(
             category,
             measuredItems: [row.measuredItem],
@@ -672,6 +720,9 @@ final class AppModel {
             perCategory: perCategory,
             errorMessage: errorMessage)
         isCleaning = false
+        if freedBytes > 0 {
+            refreshStorageOverview()
+        }
         finishDebugAutoCleanIfArmed(freedBytes: freedBytes)
     }
 

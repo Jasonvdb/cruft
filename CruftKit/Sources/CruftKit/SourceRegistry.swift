@@ -15,15 +15,22 @@ public enum SourceRegistry {
         [
             DerivedDataSource(),
             TemporaryDerivedDataSource(),
+            OtherDerivedDataSource(),
             InRepoBuildSource(),
             AgentWorktreeSource(policy: agentWorktreePolicy),
+            FlowRunArtifactSource(),
             CargoSource(),
             GradleSource(),
             SwiftPMCacheSource(),
             XcodeMiscSource(),
+            DeviceInstallCacheSource(),
+            SimulatorLogsSource(),
+            TestDeviceCloneSource(),
             SimulatorDeviceDataSource(),
+            SimulatorRuntimeSource(),
             XcodeBuildMCPSource(),
             JSCacheSource(),
+            PythonCacheSource(),
             ArchivesSource(),
         ]
     }

@@ -8,9 +8,11 @@ import CruftKitTestSupport
 /// spawned; the integrator exercises the binary end-to-end at the gate.
 
 private let allCategoryIDs = [
-    "derived-data", "temporary-derived-data", "in-repo-build", "agent-worktrees",
-    "cargo-target", "gradle", "swiftpm-cache",
-    "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "js-cache", "xcode-archives",
+    "derived-data", "temporary-derived-data", "other-derived-data", "in-repo-build",
+    "agent-worktrees", "flow-run-artifacts", "cargo-target", "gradle", "swiftpm-cache",
+    "xcode-misc", "device-install-cache", "simulator-logs", "xctest-devices",
+    "simulator-device-data", "simulator-runtimes", "xcodebuild-mcp", "js-cache",
+    "python-cache", "xcode-archives",
 ]
 
 /// ByteCountFormatter varies space (regular vs narrow no-break) and unit
@@ -101,7 +103,7 @@ private func normalizedByteString(_ string: String) -> String {
     let filtered = CLIReportCore.filteredSources(
         all, excluding: [CategoryID("derived-data"), CategoryID("js-cache")])
     #expect(filtered.map { $0.id.rawValue }
-        == ["temporary-derived-data", "in-repo-build", "agent-worktrees", "cargo-target", "gradle", "swiftpm-cache", "xcode-misc", "simulator-device-data", "xcodebuild-mcp", "xcode-archives"])
+        == allCategoryIDs.filter { $0 != "derived-data" && $0 != "js-cache" })
     #expect(CLIReportCore.filteredSources(all, excluding: []).map { $0.id.rawValue }
         == all.map { $0.id.rawValue })
     #expect(CLIReportCore.filteredSources(all, excluding: [CategoryID("bogus")]).count == all.count)

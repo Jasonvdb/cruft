@@ -130,11 +130,16 @@ func rescanIntervalClampsToRange(input: Double, expected: Double) {
         userIncluded: model.cleanAllIncludedIDs,
         userExcluded: model.cleanAllExcludedIDs)
 
-    let expected = Set(sources.filter {
+    // Sources whose items need typed metadata (test clones) refuse the
+    // synthetic item, so the planner leaves them out.
+    let expected = Set(sources.filter { source in
         model.isInCleanAll(
-            id: $0.id,
-            isDestructive: $0.isDestructive,
-            includedInCleanAllByDefault: $0.includedInCleanAllByDefault)
+            id: source.id,
+            isDestructive: source.isDestructive,
+            includedInCleanAllByDefault: source.includedInCleanAllByDefault)
+            && snapshots.contains {
+                $0.categoryID == source.id && $0.items.contains(where: source.canClean(measuredItem:))
+            }
     }.map(\.id))
     #expect(Set(plan.itemsByCategory.keys) == expected)
     #expect(plan.itemsByCategory.keys.contains(archives))

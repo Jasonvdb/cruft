@@ -28,14 +28,21 @@ iOS device support, source code, and unrelated user data remain off limits — s
 |---|---|---|
 | Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData` (per-project) | ✅ rebuilds on next build |
 | Temporary DerivedData | direct Xcode-shaped `*DerivedData*` folders under `/private/tmp` | ✅ rebuilds; explicit item deletion only after 72 h without changes and a live-use check |
+| Other DerivedData | Xcode-shaped `~/Library/Caches/<tool>/DerivedData` (for example `s1s`) | ✅ rebuilds; live-use check before deletion |
 | Project build folders | `build/`, `.build/`, `.gradle/` next to project markers under your projects root | ✅ rebuilds |
 | Claude & Codex worktrees | direct children of `.claude/worktrees` and `.codex/worktrees` under each repository | ⚠️ explicit item deletion only; registered, unlocked, unchanged for 72 h, and not active. Clean and merged by default; uncommitted or unmerged worktrees need an opt-in in Settings |
+| Flow run artifacts | `/private/tmp/flow-runs/<run-id>` | ✅ explicit item deletion only; no age gate when the run's manifest records a finished state, otherwise 72 h; live-use check always |
 | Gradle caches | `~/.gradle/caches`, `~/.gradle/daemon` | ✅ re-downloads/rebuilds |
 | SwiftPM cache | `~/Library/Caches/org.swift.swiftpm` | ✅ re-downloads |
 | Xcode caches | `~/Library/Caches/com.apple.dt.Xcode`, CoreSimulator **Caches** | ✅ regenerates |
+| Device install cache | CoreDevice `AppInstallationBinaryDeltas` container cache | ✅ the next device install sends the whole app once; live-use check |
+| Simulator logs | `~/Library/Logs/CoreSimulator` (per device), except booted simulators | ✅ logs only |
+| Xcode test clones | `~/Library/Developer/XCTestDevices` (per clone) | ✅ Xcode makes new clones; shut-down clones only, deleted with `simctl --set … delete` |
 | Simulator device data | `~/Library/Developer/CoreSimulator/Devices` (per device) | ⚠️ not re-derivable — grouped by Xcode/Other and runtime; explicit subgroup deletion only |
+| Simulator runtimes | runtime disk images from `simctl runtime list` | ⚠️ re-downloads (several GB); explicit item deletion only; never the newest per platform or one any simulator uses; deleted with `simctl runtime delete` |
 | XcodeBuildMCP workspaces | `~/Library/Developer/XcodeBuildMCP/workspaces` | ✅ rebuilds on next MCP build |
 | JS package caches | `~/.npm/_cacache`, Yarn, pnpm caches/store | ✅ re-downloads |
+| Python package caches | `~/.cache/uv`, `~/Library/Caches/pip` | ✅ re-downloads; live-use check (uvx runs tools from the cache) |
 | Xcode Archives | `~/Library/Developer/Xcode/Archives` | ⚠️ **NOT re-derivable** (release dSYMs) — excluded from Clean All by default, explicit per-category clean with a red warning |
 
 Simulator devices appear under exactly two headings. **Xcode** contains devices
@@ -49,6 +56,19 @@ Only a complete runtime subgroup can be deleted. A group is disabled if any
 device is booted, not ready, or has unknown metadata. The simulator parent,
 Xcode/Other headings, Clean All, Settings, and `cruft-cli clean` cannot perform
 bulk simulator deletion.
+
+Flow run artifacts and simulator runtimes follow the same per-item pattern.
+A flow run's manifest (`~/.local/state/flow-runs/<run-id>.json`) decides its
+rule: a finished state (`merged`, `failed`, `cancelled`, …) is the owner's
+statement that the run is done, so no age gate applies; a live run with a
+recent heartbeat is refused; a run with no manifest needs 72 hours. A runtime
+is offered only when no simulator in either device set uses it and a newer one
+is installed. Both are checked again at the deletion choke point.
+
+Below the categories, **Other storage** lists space cruft does not clean and
+what frees it: swap (a restart), a downloaded macOS update, protected Device
+Support, the system simulator cache, and large app data such as the Android SDK.
+It is view only.
 
 Temporary DerivedData and agent worktrees are also never part of Clean All.
 Each directory has its own action. The action stays disabled until a complete
@@ -74,7 +94,9 @@ not. The setting is off by default.
 Never deleted: `/private/tmp` itself, any `.claude/worktrees` or
 `.codex/worktrees` root, the CoreSimulator **Devices root**, iOS/watchOS DeviceSupport,
 Android AVDs, `.git`, iCloud Drive, `node_modules` (v1), Gradle wrapper
-distributions, and anything outside your home directory.
+distributions, and anything outside your home directory except direct
+`/private/tmp` DerivedData and flow-run children (guarded modes) and simulator
+runtimes (removed only by `simctl`).
 
 ## Safety model
 
@@ -97,6 +119,16 @@ cruft deletes files, so it is engineered like it.
   of the exact canonical CoreSimulator Devices root. It re-reads `device.plist`,
   requires matching metadata and shutdown state, then calls
   `xcrun simctl delete <UDID>` instead of removing the directory directly.
+- **Test clones and runtimes go through `simctl`.** Clone mode reuses the
+  simulator contract for the XCTestDevices set and calls
+  `xcrun simctl --set <XCTestDevices> delete <UDID>`. Runtime mode never removes
+  a file on a real Mac: it reads `simctl runtime list` and every `device.plist`
+  again, requires the same eligible runtime at the same image path, then calls
+  `xcrun simctl runtime delete <identifier>`.
+- **Opt-in live-use check.** Sources that a running tool can build into or run
+  code from (other DerivedData, Python caches, the device install cache) make
+  every generic deletion refuse a target with an open file, working
+  directory, or command line that refers to it.
 - **Temporary and worktree deletion have guarded modes.** Temporary items must
   be direct `/private/tmp` children with an Xcode `Build` signature. Worktrees
   must be direct registered Claude/Codex children with safe local Git state.
@@ -160,7 +192,8 @@ swift run --package-path CruftKit cruft-cli clean --category derived-data --yes 
 
 `clean` is dry-run by default. Deleting from your real home requires an
 extra explicit flag beyond `--yes` (it tells you which). The CLI lists
-simulator data, temporary DerivedData, and agent worktrees in scan totals but
+simulator data, temporary DerivedData, agent worktrees, flow run artifacts, and
+simulator runtimes in scan totals but
 refuses whole-category cleanup for them, including dry-run requests. Their
 deletion actions are available only from the app's exact subgroup or item
 controls.

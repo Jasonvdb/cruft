@@ -103,9 +103,14 @@ private let decoyPaths = [
     let plan = CleanPlanner(sources: SourceRegistry.allSources).planCleanAll(snapshots: snapshots)
     #expect(!plan.itemsByCategory.keys.contains(archives))
     #expect(!plan.itemsByCategory.keys.contains(simulatorData))
-    let expectedPlanIDs = Set(SourceRegistry.allSources.filter {
-        $0.supportsCleaning && $0.allowsWholeCategoryCleaning
-            && !$0.isDestructive && $0.includedInCleanAllByDefault
+    // A default-in category joins only with at least one eligible item: the
+    // canonical test clone is unclassified, so its category stays out.
+    let expectedPlanIDs = Set(SourceRegistry.allSources.filter { source in
+        source.supportsCleaning && source.allowsWholeCategoryCleaning
+            && !source.isDestructive && source.includedInCleanAllByDefault
+            && snapshots.contains {
+                $0.categoryID == source.id && $0.items.contains(where: source.canClean(measuredItem:))
+            }
     }.map(\.id))
     #expect(Set(plan.itemsByCategory.keys) == expectedPlanIDs)
     #expect(plan.estimatedBytes > 0)
@@ -147,7 +152,12 @@ private let decoyPaths = [
                     "\(id): root \(path) must survive a contentsOnly clean")
                 let children = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
                 #expect(children.isEmpty, "\(id): \(path) should be emptied, found \(children)")
-            case .simulatorDevice, .temporaryDerivedData, .agentWorktree:
+            case .testDeviceClone:
+                #expect(
+                    !FileManager.default.fileExists(atPath: path),
+                    "\(id): \(path) should be deleted")
+            case .simulatorDevice, .temporaryDerivedData, .agentWorktree,
+                .flowRunArtifacts, .simulatorRuntime:
                 Issue.record("explicit-item categories must not enter Clean All")
             }
         }

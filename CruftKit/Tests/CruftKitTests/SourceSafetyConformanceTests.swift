@@ -146,7 +146,11 @@ private func canonicalPath(_ url: URL) -> String {
         .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1.id.rawValue] ?? 0) }
     #expect(validatedItems == expectedTotal - expectedViewOnlyTotal - refusedIneligibleItems)
     #expect(refusedViewOnlyItems == expectedViewOnlyTotal)
-    #expect(refusedIneligibleItems == FixtureHome.canonicalExpectedItemCounts["simulator-device-data"])
+    // The canonical simulator device and test clone are unclassified, so
+    // both stay visible but ineligible.
+    let expectedIneligible = ["simulator-device-data", "xctest-devices"]
+        .reduce(0) { $0 + (FixtureHome.canonicalExpectedItemCounts[$1] ?? 0) }
+    #expect(refusedIneligibleItems == expectedIneligible)
 }
 
 @Test func conformance_canonicalFixtureItemCountsMatch() async throws {

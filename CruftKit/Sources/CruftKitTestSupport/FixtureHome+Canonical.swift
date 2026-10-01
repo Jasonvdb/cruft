@@ -72,6 +72,27 @@ extension FixtureHome {
         // dir (a decoy for derived-data, a real archive here) → 3 items
         _ = try plantXcodeArchiveFixture(name: "DemoApp 1.0", dateDir: "2026-06-01")
         _ = try plantXcodeArchiveFixture(name: "RootArchive", dateDir: nil)
+
+        // other-derived-data: one tool DerivedData (1 item) + two decoys
+        _ = try plantOtherDerivedDataFixture()
+
+        // flow-run-artifacts: one finished run with its manifest (1 item)
+        _ = try plantFlowRunFixture()
+
+        // device-install-cache: the CoreDevice delta root (1 item)
+        _ = try plantDeviceInstallCacheFixture()
+
+        // simulator-logs: one device folder + one loose log (2 items)
+        _ = try plantSimulatorLogsFixture()
+
+        // xctest-devices: one unclassified, protected clone (1 item)
+        _ = try plantTestDeviceClone()
+
+        // python-cache: uv + pip (2 items)
+        try plantPythonCacheFixture()
+
+        // simulator-runtimes: none. Production inventory runs only for the
+        // real home; runtime tests inject their own inventory.
     }
 
     /// Item counts per category for the canonical tree, used by integration
@@ -89,5 +110,12 @@ extension FixtureHome {
         "xcodebuild-mcp": 1,
         "js-cache": 4,
         "xcode-archives": 3,
+        "other-derived-data": 1,
+        "flow-run-artifacts": 1,
+        "device-install-cache": 1,
+        "simulator-logs": 2,
+        "xctest-devices": 1,
+        "simulator-runtimes": 0,
+        "python-cache": 2,
     ]
 }

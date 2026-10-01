@@ -235,8 +235,8 @@ private struct GuardedCleanupItemRow: View {
                         .help(waivedHelpText(reason))
                 }
             } else {
-                badge("72h+", color: .secondary)
-                    .help("No metadata change was found in the last 72 hours. Live use is checked before deletion.")
+                badge(readyBadgeText, color: .secondary)
+                    .help(readyHelpText)
             }
             Spacer(minLength: 8)
             Text(AppModel.formattedBytes(row.allocatedBytes))
@@ -259,7 +259,29 @@ private struct GuardedCleanupItemRow: View {
         if cleanDisabled { return "Wait for the current deletion to finish." }
         if let reason = row.blockingReasons.first { return helpText(reason) }
         if let reason = row.waivedReasons.first { return waivedHelpText(reason) }
+        if row.readyNote == .unusedRuntime {
+            return "Delete with simctl after a fresh check that no simulator uses it…"
+        }
         return "Delete after a live active-use safety check…"
+    }
+
+    private var readyBadgeText: String {
+        switch row.readyNote {
+        case .untouched: "72h+"
+        case .finishedRun: "finished"
+        case .unusedRuntime: "unused"
+        }
+    }
+
+    private var readyHelpText: String {
+        switch row.readyNote {
+        case .untouched:
+            "No metadata change was found in the last 72 hours. Live use is checked before deletion."
+        case .finishedRun:
+            "The /flow manifest records a finished run. Live use is checked before deletion."
+        case .unusedRuntime:
+            "No simulator uses this runtime and a newer one is installed."
+        }
     }
 
     /// Uncommitted work is the only waived reason that loses data, so it is
@@ -288,14 +310,19 @@ private struct GuardedCleanupItemRow: View {
         case .dirty: "dirty"
         case .locked: "locked"
         case .notContainedInPrimaryBranch: "not merged"
+        case .runActive: "run active"
+        case .runtimeInUse: "in use"
+        case .runtimeNewest: "newest"
+        case .runtimeNotReady: "not ready"
         }
     }
 
     private func badgeColor(_ reason: GuardedCleanupList.BlockingReason) -> Color {
         switch reason {
-        case .dirty, .notContainedInPrimaryBranch: .orange
+        case .dirty, .notContainedInPrimaryBranch, .runActive: .orange
         case .recent, .ageUnknown, .measurementIncomplete,
-                .worktreeMetadataUnknown, .locked: .secondary
+                .worktreeMetadataUnknown, .locked,
+                .runtimeInUse, .runtimeNewest, .runtimeNotReady: .secondary
         }
     }
 
@@ -315,6 +342,14 @@ private struct GuardedCleanupItemRow: View {
             "Delete is unavailable because Git marks the worktree as locked."
         case .notContainedInPrimaryBranch:
             "Delete is unavailable because the worktree commit is not contained in the local primary branch."
+        case .runActive:
+            "Delete is unavailable because the /flow manifest records a live run with a recent heartbeat."
+        case .runtimeInUse:
+            "Delete is unavailable because at least one simulator uses this runtime. Delete those simulators first."
+        case .runtimeNewest:
+            "Delete is unavailable because this is the newest runtime for its platform. cruft always keeps it."
+        case .runtimeNotReady:
+            "Delete is unavailable because simctl does not report this runtime as ready and deletable."
         }
     }
 

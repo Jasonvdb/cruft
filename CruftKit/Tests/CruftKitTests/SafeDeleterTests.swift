@@ -697,6 +697,9 @@ private extension SafeDeleterError {
         case .activeUseDetected: "activeUseDetected"
         case .activeUseCheckFailed: "activeUseCheckFailed"
         case .worktreeDeleteFailed: "worktreeDeleteFailed"
+        case .flowRunActive: "flowRunActive"
+        case .simulatorRuntimeInvalid: "simulatorRuntimeInvalid"
+        case .simulatorRuntimeDeleteFailed: "simulatorRuntimeDeleteFailed"
         }
     }
 }

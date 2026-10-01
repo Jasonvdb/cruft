@@ -67,6 +67,14 @@ struct MenuContentView: View {
                         guardedCategory(
                             row: row,
                             list: model.agentWorktreeList)
+                    } else if row.id == FlowRunArtifactSource.id {
+                        guardedCategory(
+                            row: row,
+                            list: model.flowRunList)
+                    } else if row.id == SimulatorRuntimeSource.id {
+                        guardedCategory(
+                            row: row,
+                            list: model.simulatorRuntimeList)
                     } else {
                         CategoryRowView(
                             row: row,
@@ -75,6 +83,12 @@ struct MenuContentView: View {
                             onClean: { model.requestClean(category: row.id) })
                     }
                 }
+
+                Divider()
+                    .padding(.vertical, 2)
+                StorageOverviewView(
+                    overview: model.storageOverview,
+                    isMeasuring: model.isMeasuringStorageOverview)
             }
             // Keep row actions clear of the overlaid vertical scroll bar.
             .padding(.trailing, 14)

@@ -65,6 +65,24 @@ public struct FoundationMeasurer: DirectoryMeasurer {
             throw MeasurementError.rootMissing(root)
         }
 
+        // A regular-file root (a simulator runtime disk image) is its own
+        // whole measurement. A symlink root still walks as before: 0 bytes.
+        let fileKeys: Set<URLResourceKey> = [
+            .isRegularFileKey, .isSymbolicLinkKey,
+            .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
+            .contentModificationDateKey,
+        ]
+        if let values = try? root.resourceValues(forKeys: fileKeys),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true
+        {
+            return ItemSize(
+                allocatedBytes: Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0),
+                fileCount: 1,
+                erroredEntries: 0,
+                newestModificationDate: values.contentModificationDate)
+        }
+
         // No .skipsHiddenFiles and no .skipsPackageDescendants: we must size
         // ModuleCache.noindex and the insides of bundles. Symlinks are not
         // followed by the enumerator by default.

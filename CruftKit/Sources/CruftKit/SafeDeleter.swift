@@ -41,6 +41,52 @@ public enum SafeDeleterError: Error, Equatable {
     case activeUseCheckFailed(String)
     /// Worktree mode: Git refused or failed the non-force removal.
     case worktreeDeleteFailed(String)
+    /// Flow-run mode: the run manifest records a live run with a recent
+    /// heartbeat, so a session may still need the artifacts.
+    case flowRunActive(String)
+    /// Runtime mode: the live `simctl` facts no longer match the scanned,
+    /// eligible runtime (a device now uses it, or it changed or vanished).
+    case simulatorRuntimeInvalid(String)
+    /// Runtime mode: `simctl runtime delete` failed.
+    case simulatorRuntimeDeleteFailed(String)
+}
+
+/// Injectable command seam for the v7 `simctl` mutations: deleting one clone
+/// from a non-default device set, and deleting one runtime image.
+protocol SimulatorToolCommandRunning: Sendable {
+    func deleteDevice(udid: String, inDeviceSet deviceSet: URL) throws
+    func deleteRuntime(identifier: String) throws
+}
+
+struct SimctlToolCommandRunner: SimulatorToolCommandRunning {
+    enum CommandError: Error, Equatable {
+        case failed(Int32, String)
+    }
+
+    private let processRunner: any DirectProcessRunning
+
+    init(processRunner: any DirectProcessRunning = BoundedDirectProcessRunner(timeout: 120)) {
+        self.processRunner = processRunner
+    }
+
+    func deleteDevice(udid: String, inDeviceSet deviceSet: URL) throws {
+        try run(["simctl", "--set", deviceSet.path(percentEncoded: false), "delete", udid])
+    }
+
+    func deleteRuntime(identifier: String) throws {
+        try run(["simctl", "runtime", "delete", identifier])
+    }
+
+    private func run(_ arguments: [String]) throws {
+        let result = try processRunner.run(
+            executable: URL(filePath: "/usr/bin/xcrun"), arguments: arguments)
+        guard result.status == 0 else {
+            let message = String(decoding: result.standardError.prefix(1024), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw CommandError.failed(result.status, message)
+        }
+    }
 }
 
 /// Injectable command seam for the one real-home simulator mutation.
@@ -135,6 +181,11 @@ public actor SafeDeleter: ItemDeleting {
     /// unless a caller opts in, and the ONLY thing that can make this actor
     /// pass `--force` to Git.
     private let agentWorktreePolicy: AgentWorktreeDeletionPolicy
+    private let toolCommandRunner: any SimulatorToolCommandRunning
+    private let runtimeInventory: any SimulatorRuntimeInventoryProviding
+    /// How long a runtime deletion may take to finish in the background
+    /// before the clean reports and moves on.
+    private let runtimeRemovalTimeout: Duration
 
     /// - Parameter home: canonical effective home (from `ScanContext.home`).
     ///   Throws `homeOverrideRefused` unless it is the real canonical $HOME
@@ -167,9 +218,15 @@ public actor SafeDeleter: ItemDeleting {
         worktreeManager: any AgentWorktreeManaging = SystemAgentWorktreeManager(),
         measurer: any DirectoryMeasurer = FoundationMeasurer(),
         now: @escaping @Sendable () -> Date = Date.init,
-        agentWorktreePolicy: AgentWorktreeDeletionPolicy = .strict
+        agentWorktreePolicy: AgentWorktreeDeletionPolicy = .strict,
+        toolCommandRunner: any SimulatorToolCommandRunning = SimctlToolCommandRunner(),
+        runtimeInventory: any SimulatorRuntimeInventoryProviding = SystemSimulatorRuntimeInventory(),
+        runtimeRemovalTimeout: Duration = .seconds(180)
     ) throws {
         self.mode = mode
+        self.toolCommandRunner = toolCommandRunner
+        self.runtimeInventory = runtimeInventory
+        self.runtimeRemovalTimeout = runtimeRemovalTimeout
         let candidate = Self.normalizedPath(home.cruftCanonical)
         let realHome = Self.normalizedPath(
             FileManager.default.homeDirectoryForCurrentUser.cruftCanonical)
@@ -199,9 +256,21 @@ public actor SafeDeleter: ItemDeleting {
             return try await deleteTemporaryDerivedData(
                 request, target: target, canonicalTargetPath: targetPath)
         }
+        if item.deletionMode == .flowRunArtifacts {
+            return try await deleteFlowRunArtifacts(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
+        if item.deletionMode == .simulatorRuntime {
+            return try await deleteSimulatorRuntime(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
         try checkInsideHome(targetPath)
         if item.deletionMode == .simulatorDevice {
             return try deleteSimulator(
+                request, target: target, canonicalTargetPath: targetPath)
+        }
+        if item.deletionMode == .testDeviceClone {
+            return try deleteTestDeviceClone(
                 request, target: target, canonicalTargetPath: targetPath)
         }
         if item.deletionMode == .agentWorktree {
@@ -217,17 +286,196 @@ public actor SafeDeleter: ItemDeleting {
             try checkDepthFloor(targetPath)
             try Self.validateOwnership(
                 ownerUID: target.ownerUID, currentUID: getuid(), path: targetPath)
+            if request.requiresLiveUseCheck {
+                try validateNotInUse(target.canonicalURL)
+            }
             try perform([target.canonicalURL])
             return [target.canonicalURL]
         case .contentsOnly:
             let children = try validatedChildren(of: target.canonicalURL)
+            // One check on the root covers every child: lsof +D is recursive.
+            if request.requiresLiveUseCheck, !children.isEmpty {
+                try validateNotInUse(target.canonicalURL)
+            }
             try perform(children)
             return children
-        case .simulatorDevice:
+        case .simulatorDevice, .testDeviceClone:
             preconditionFailure("simulator deletion returned before the generic switch")
-        case .temporaryDerivedData, .agentWorktree:
+        case .temporaryDerivedData, .agentWorktree, .flowRunArtifacts, .simulatorRuntime:
             preconditionFailure("guarded deletion returned before the generic switch")
         }
+    }
+
+    /// One /flow run artifact directory. The manifest is read again here; a
+    /// changed manifest means the scan is stale and the deletion is refused.
+    private func deleteFlowRunArtifacts(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) async throws -> [URL] {
+        let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
+        let runID = request.item.url.lastPathComponent
+        let parentPath = Self.normalizedStandardizedPath(
+            request.item.url.deletingLastPathComponent())
+        guard request.item.categoryID == FlowRunArtifactSource.id,
+            request.item.deletionMode == .flowRunArtifacts,
+            rawTargetPath == canonicalTargetPath,
+            target.isDirectory,
+            !target.isSymlink,
+            request.allowedRoots.count == 1,
+            Self.normalizedPath(request.allowedRoots[0].cruftCanonical) == parentPath,
+            FlowRunManifestReader.isValidRunID(runID),
+            let retained = request.item.flowRunMetadata,
+            retained.runID == runID
+        else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+
+        let home = URL(filePath: homePath, directoryHint: .isDirectory)
+        let expectedParent: URL = isRealHome
+            ? URL(filePath: "/private/tmp/flow-runs", directoryHint: .isDirectory)
+            : home.appending(path: "private-tmp/flow-runs")
+        guard parentPath == Self.normalizedPath(expectedParent.cruftCanonical) else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+        if !isRealHome {
+            try checkInsideHome(canonicalTargetPath)
+        }
+        try Self.checkDenylist(canonicalTargetPath)
+        try Self.validateOwnership(
+            ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
+
+        let current = FlowRunManifestReader(
+            stateDirectory: home.appending(path: ".local/state/flow-runs"))
+            .metadata(runID: runID)
+        guard current == retained else {
+            throw SafeDeleterError.guardedTargetInvalid(rawTargetPath)
+        }
+        if current.isActive(now: now()) {
+            throw SafeDeleterError.flowRunActive(rawTargetPath)
+        }
+        if current.requiresAgeGate {
+            try await validateMinimumAge(target.canonicalURL)
+        }
+        try validateNotInUse(target.canonicalURL)
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        try perform([target.canonicalURL])
+        return [target.canonicalURL]
+    }
+
+    /// One simulator runtime image. Nothing is removed directly on a real
+    /// Mac: the live `simctl` facts must still show an eligible runtime with
+    /// the same identity and image path, and then `simctl runtime delete`
+    /// removes it.
+    private func deleteSimulatorRuntime(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) async throws -> [URL] {
+        let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
+        guard request.item.categoryID == SimulatorRuntimeSource.id,
+            request.item.deletionMode == .simulatorRuntime,
+            !target.isSymlink,
+            let retained = request.item.simulatorRuntimeMetadata,
+            retained.isEligibleForDeletion
+        else {
+            throw SafeDeleterError.simulatorRuntimeInvalid(rawTargetPath)
+        }
+        try Self.checkAllowedRoots(
+            canonicalTargetPath, roots: request.allowedRoots, mode: .entireItem)
+        try Self.checkDenylist(canonicalTargetPath)
+        if !isRealHome {
+            try checkInsideHome(canonicalTargetPath)
+        }
+
+        let home = URL(filePath: homePath, directoryHint: .isDirectory)
+        let records: [SimulatorRuntimeRecord]
+        do {
+            records = try runtimeInventory.runtimes(home: home)
+        } catch {
+            throw SafeDeleterError.simulatorRuntimeInvalid(
+                "runtime inventory failed: \(error)")
+        }
+        guard let current = records.first(where: {
+            $0.metadata.identifier == retained.identifier
+        }),
+            current.metadata.isEligibleForDeletion,
+            current.metadata.matchesForDeletion(retained),
+            Self.normalizedStandardizedPath(current.imageURL) == rawTargetPath
+        else {
+            throw SafeDeleterError.simulatorRuntimeInvalid(rawTargetPath)
+        }
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        guard isRealHome else {
+            // Fixture homes have no simulator service. Remove only the exact
+            // validated fixture image through this same choke point.
+            try Self.validateOwnership(
+                ownerUID: target.ownerUID, currentUID: getuid(), path: canonicalTargetPath)
+            try perform([target.canonicalURL])
+            return [target.canonicalURL]
+        }
+        do {
+            try toolCommandRunner.deleteRuntime(identifier: retained.identifier)
+        } catch {
+            throw SafeDeleterError.simulatorRuntimeDeleteFailed(String(describing: error))
+        }
+        await waitForRuntimeRemoval(identifier: retained.identifier, home: home)
+        deletedURLs.append(target.canonicalURL)
+        return [target.canonicalURL]
+    }
+
+    /// `simctl runtime delete` returns while the image is still being
+    /// removed. Waiting lets the volume free-space delta report real bytes.
+    private func waitForRuntimeRemoval(identifier: String, home: URL) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + runtimeRemovalTimeout
+        while clock.now < deadline {
+            guard let records = try? runtimeInventory.runtimes(home: home),
+                records.contains(where: { $0.metadata.identifier == identifier })
+            else { return }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    /// One shut-down clone in Xcode's XCTestDevices set, deleted through
+    /// `simctl --set` so the set's registry stays consistent.
+    private func deleteTestDeviceClone(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String
+    ) throws -> [URL] {
+        let deviceSet = URL(filePath: homePath, directoryHint: .isDirectory)
+            .appending(path: TestDeviceCloneSource.devicesRelativePath)
+        let udid = try validatedRegisteredDevice(
+            request,
+            target: target,
+            canonicalTargetPath: canonicalTargetPath,
+            expectedRoot: deviceSet,
+            categoryID: TestDeviceCloneSource.id)
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        if isRealHome {
+            do {
+                try toolCommandRunner.deleteDevice(udid: udid, inDeviceSet: deviceSet)
+            } catch {
+                throw SafeDeleterError.simulatorDeleteFailed(String(describing: error))
+            }
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        try perform([target.canonicalURL])
+        return [target.canonicalURL]
     }
 
     private func deleteTemporaryDerivedData(
@@ -418,8 +666,45 @@ public actor SafeDeleter: ItemDeleting {
         target: Inspection,
         canonicalTargetPath: String
     ) throws -> [URL] {
-        let expectedRoot = URL(filePath: homePath, directoryHint: .isDirectory)
-            .appending(path: "Library/Developer/CoreSimulator/Devices")
+        let udid = try validatedRegisteredDevice(
+            request,
+            target: target,
+            canonicalTargetPath: canonicalTargetPath,
+            expectedRoot: URL(filePath: homePath, directoryHint: .isDirectory)
+                .appending(path: "Library/Developer/CoreSimulator/Devices"),
+            categoryID: SimulatorDeviceDataSource.id)
+
+        if mode == .dryRun {
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+        if isRealHome {
+            do {
+                try simulatorCommandRunner.deleteSimulator(udid: udid)
+            } catch {
+                throw SafeDeleterError.simulatorDeleteFailed(String(describing: error))
+            }
+            deletedURLs.append(target.canonicalURL)
+            return [target.canonicalURL]
+        }
+
+        // Fixture homes have no CoreSimulator registration. Remove only the
+        // exact validated fixture directory through this same choke point.
+        try perform([target.canonicalURL])
+        return [target.canonicalURL]
+    }
+
+    /// The shared registered-device contract for the default device set and
+    /// the XCTestDevices set: one real, direct UUID child of the exact
+    /// canonical set root, with retained metadata that still matches a fresh
+    /// `device.plist` read and a shut-down, eligible state. Returns the UDID.
+    private func validatedRegisteredDevice(
+        _ request: DeletionRequest,
+        target: Inspection,
+        canonicalTargetPath: String,
+        expectedRoot: URL,
+        categoryID: CategoryID
+    ) throws -> String {
         let expectedRootPath = Self.normalizedStandardizedPath(expectedRoot)
         let canonicalExpectedRootPath = Self.normalizedPath(expectedRoot.cruftCanonical)
         let rawTargetPath = Self.normalizedStandardizedPath(request.item.url)
@@ -446,7 +731,7 @@ public actor SafeDeleter: ItemDeleting {
 
         let udid = request.item.url.lastPathComponent
         guard UUID(uuidString: udid) != nil,
-            request.item.categoryID == SimulatorDeviceDataSource.id,
+            request.item.categoryID == categoryID,
             let itemMetadata = request.item.simulatorMetadata,
             UUID(uuidString: itemMetadata.udid) == UUID(uuidString: udid),
             let retainedName = itemMetadata.name,
@@ -473,25 +758,7 @@ public actor SafeDeleter: ItemDeleting {
         else {
             throw SafeDeleterError.simulatorTargetInvalid(rawTargetPath)
         }
-
-        if mode == .dryRun {
-            deletedURLs.append(target.canonicalURL)
-            return [target.canonicalURL]
-        }
-        if isRealHome {
-            do {
-                try simulatorCommandRunner.deleteSimulator(udid: udid)
-            } catch {
-                throw SafeDeleterError.simulatorDeleteFailed(String(describing: error))
-            }
-            deletedURLs.append(target.canonicalURL)
-            return [target.canonicalURL]
-        }
-
-        // Fixture homes have no CoreSimulator registration. Remove only the
-        // exact validated fixture directory through this same choke point.
-        try perform([target.canonicalURL])
-        return [target.canonicalURL]
+        return udid
     }
 
     /// Enumerates DIRECT children (hidden files included) of a

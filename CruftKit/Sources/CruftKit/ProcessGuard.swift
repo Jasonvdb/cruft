@@ -51,8 +51,18 @@ public struct ProcessGuard: Sendable {
     private static let xcodeCategories: Set<CategoryID> = [
         CategoryID("derived-data"), CategoryID("xcode-misc"), CategoryID("xcode-archives"),
         CategoryID("simulator-device-data"), CategoryID("temporary-derived-data"),
+        CategoryID("other-derived-data"), CategoryID("simulator-logs"),
+        CategoryID("xctest-devices"), CategoryID("device-install-cache"),
+        CategoryID("simulator-runtimes"),
+    ]
+    /// Categories that a command-line build writes into without Xcode.app.
+    private static let xcodebuildCategories: Set<CategoryID> = [
+        CategoryID("derived-data"), CategoryID("other-derived-data"),
+        CategoryID("temporary-derived-data"), CategoryID("xctest-devices"),
     ]
     private static let gradleCategory = CategoryID("gradle")
+    private static let pythonCategory = CategoryID("python-cache")
+    private static let pythonTools: Set<String> = ["uv", "uvx", "pip", "pip3"]
     private static let xcodeBundleID = "com.apple.dt.Xcode"
 
     private let querier: any ProcessQuerying
@@ -77,6 +87,24 @@ public struct ProcessGuard: Sendable {
             warnings.append(
                 "A Gradle daemon is running — cleaning may break in-progress builds (run ./gradlew --stop first).")
         }
+        if !categories.isDisjoint(with: Self.xcodebuildCategories),
+            querier.processCommandLines().contains(where: { Self.executableName($0) == "xcodebuild" })
+        {
+            warnings.append("xcodebuild is running — cleaning may break a command-line build or test run.")
+        }
+        if categories.contains(Self.pythonCategory),
+            querier.processCommandLines().contains(where: {
+                Self.pythonTools.contains(Self.executableName($0))
+            })
+        {
+            warnings.append("uv or pip is running — cruft will refuse files that are still in use.")
+        }
         return warnings
+    }
+
+    /// The last path component of a command line's first word.
+    private static func executableName(_ commandLine: String) -> String {
+        let executable = commandLine.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+        return executable.split(separator: "/").last.map(String.init) ?? executable
     }
 }
